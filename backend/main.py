@@ -3,7 +3,7 @@ HR Knowledge Copilot — FastAPI backend
 
 Endpoints:
   GET  /health          — liveness check
-  POST /api/chat        — primary chat (rate-limited, 10 req/min per IP, 30s timeout)
+  POST /api/chat        — primary chat (rate-limited, 10 req/min per IP, 120s timeout)
   POST /api/feedback    — thumbs-up/down signal from users
 """
 
@@ -41,16 +41,16 @@ logger = logging.getLogger("hr_copilot")
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 KB_PATH = os.getenv("KB_PATH", "../data/knowledge_base.md")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 CORS_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
     if o.strip()
 ]
 
-LLM_TIMEOUT_SECONDS = 30.0
+LLM_TIMEOUT_SECONDS = 120.0  # Local models are slower than cloud APIs
 
 # In-memory conversation history { conversationId: [{"role": ..., "content": ...}, ...] }
 _conversation_store: dict[str, list[dict[str, str]]] = {}
@@ -64,19 +64,18 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
-        "Starting HR Copilot — model=%s kb=%s cors_origins=%s timeout=%.0fs",
-        CLAUDE_MODEL, KB_PATH, CORS_ORIGINS, LLM_TIMEOUT_SECONDS,
+        "Starting HR Copilot — model=%s host=%s kb=%s cors_origins=%s timeout=%.0fs",
+        OLLAMA_MODEL, OLLAMA_HOST, KB_PATH, CORS_ORIGINS, LLM_TIMEOUT_SECONDS,
     )
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY is not set — /api/chat will return 503")
+    logger.info("Make sure Ollama is running: ollama serve")
     yield
     logger.info("Shutting down HR Copilot")
 
 
 app = FastAPI(
     title="HR Knowledge Copilot API",
-    version="1.1.0",
-    description="Enterprise HR Knowledge Base powered by Claude AI",
+    version="2.0.0",
+    description="Enterprise HR Knowledge Base powered by local Ollama LLM",
     lifespan=lifespan,
 )
 
@@ -94,7 +93,7 @@ app.add_middleware(
 # ── Singletons ───────────────────────────────────────────────────────────── #
 
 knowledge_base = KnowledgeBase(kb_path=KB_PATH)
-llm_handler = LLMHandler(api_key=ANTHROPIC_API_KEY, model=CLAUDE_MODEL)
+llm_handler = LLMHandler(model=OLLAMA_MODEL, host=OLLAMA_HOST)
 
 # ── Schemas ──────────────────────────────────────────────────────────────── #
 
@@ -161,7 +160,8 @@ async def health_check() -> dict:
     return {
         "status": "healthy",
         "kb_sections": knowledge_base.section_count,
-        "model": CLAUDE_MODEL,
+        "model": OLLAMA_MODEL,
+        "ollama_host": OLLAMA_HOST,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -172,12 +172,6 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     t0 = time.perf_counter()
     cid = body.conversationId
     logger.info("chat request cid=%r message=%r", cid, body.message[:80])
-
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="AI service is not configured. Please contact the system administrator.",
-        )
 
     # Last MAX_HISTORY_ENTRIES messages for context
     history = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
@@ -200,13 +194,13 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         logger.warning("LLM timeout after %.0fs for cid=%r", LLM_TIMEOUT_SECONDS, cid)
         raise HTTPException(
             status_code=504,
-            detail=f"The AI service did not respond within {int(LLM_TIMEOUT_SECONDS)} seconds. Please try again.",
+            detail=f"Ollama did not respond within {int(LLM_TIMEOUT_SECONDS)} seconds. Make sure Ollama is running and the model is pulled.",
         )
     except Exception as exc:
         logger.error("LLM error for cid=%r: %s", cid, exc, exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail="The AI service is temporarily unavailable. Please try again in a moment.",
+            detail="Could not reach Ollama. Make sure it is running: ollama serve",
         ) from exc
 
     # Persist the exchange, capped to avoid unbounded growth

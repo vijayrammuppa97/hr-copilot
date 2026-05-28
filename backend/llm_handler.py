@@ -1,18 +1,14 @@
 """
-Handles all communication with the Claude API via the Anthropic SDK.
+Handles all communication with the local Ollama LLM server.
 
-Key design decisions:
-- System prompt is marked ephemeral for prompt caching (reduces latency on
-  repeated calls with the same system prompt).
-- Conversation history is limited upstream; this module accepts whatever
-  slice it receives and passes it verbatim.
-- Confidence is estimated heuristically from KB hit count — no model call.
+Ollama runs models locally (no API key required).
+Default model: llama3.2 — change via OLLAMA_MODEL env var.
+Ollama must be running: https://ollama.com
 """
 
 import logging
-from typing import Any
 
-import anthropic
+import ollama
 
 logger = logging.getLogger("hr_copilot.llm")
 
@@ -46,15 +42,10 @@ hr@company.com."
 
 
 class LLMHandler:
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6") -> None:
-        if not api_key:
-            logger.warning("ANTHROPIC_API_KEY is not set — LLM calls will fail")
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(self, model: str = "llama3.2", host: str = "http://localhost:11434") -> None:
         self._model = model
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
+        self._client = ollama.AsyncClient(host=host)
+        logger.info("LLMHandler initialised — model=%s host=%s", model, host)
 
     async def generate(
         self,
@@ -63,64 +54,39 @@ class LLMHandler:
         history: list[dict[str, str]],
     ) -> tuple[str, float]:
         """
-        Call Claude and return (response_text, confidence_score).
+        Call Ollama and return (response_text, confidence_score).
 
-        confidence_score is a [0, 1] heuristic derived from how many KB
-        sections matched the query; it is not a model-reported probability.
+        confidence_score is a heuristic derived from KB hit count.
         """
         context_block = self._build_context(kb_context)
         confidence = self._estimate_confidence(kb_context)
 
-        # Build the messages array: prior turns + current user message
-        messages: list[dict[str, Any]] = [
-            {"role": m["role"], "content": m["content"]} for m in history
+        # Build messages: system prompt → prior history → current user message
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
         ]
-        messages.append(
-            {
-                "role": "user",
-                "content": f"{user_message}\n\n{context_block}",
-            }
-        )
+        for turn in history:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": f"{user_message}\n\n{context_block}"})
 
-        response = await self._client.messages.create(
+        response = await self._client.chat(
             model=self._model,
-            max_tokens=1024,
-            # Cache the static system prompt to reduce time-to-first-token
-            # on subsequent requests (requires anthropic SDK >= 0.28).
-            system=[
-                {
-                    "type": "text",
-                    "text": _SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
             messages=messages,
+            options={"num_predict": 1024, "temperature": 0.3},
         )
 
-        answer = response.content[0].text.strip()
-        logger.debug(
-            "model=%s tokens_in=%s tokens_out=%s confidence=%.2f",
-            self._model,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-            confidence,
-        )
+        answer = response.message.content.strip()
+        logger.debug("model=%s confidence=%.2f", self._model, confidence)
         return answer, confidence
-
-    # ------------------------------------------------------------------ #
-    # Private helpers
-    # ------------------------------------------------------------------ #
 
     def _build_context(self, results: list[dict]) -> str:
         if not results:
             return "<policy_context>No matching policy sections found for this query.</policy_context>"
-
         parts = [f"### {r['section']}\n{r['content']}" for r in results[:5]]
         body = "\n\n".join(parts)
         return f"<policy_context>\n{body}\n</policy_context>"
 
     def _estimate_confidence(self, results: list[dict]) -> float:
-        """Heuristic: more KB hits → higher confidence."""
         if not results:
             return 0.20
         mapping = {1: 0.60, 2: 0.75, 3: 0.85, 4: 0.90}
