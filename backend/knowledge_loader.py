@@ -122,6 +122,19 @@ class KnowledgeBase:
             for _, s in scored[:top_k]
         ]
 
+    def add_sections(self, sections: list[dict]) -> int:
+        """Append parsed document sections to the live knowledge base. Returns count added."""
+        added = 0
+        for s in sections:
+            sec = s.get("section", "").strip()
+            content = s.get("content", "").strip()
+            if sec and content:
+                self._sections.append(KnowledgeSection(sec, content))
+                added += 1
+        if added:
+            logger.info("Added %d uploaded sections (total=%d)", added, len(self._sections))
+        return added
+
     @property
     def section_count(self) -> int:
         return len(self._sections)

@@ -9,6 +9,7 @@ const MAX_CHARS = 2000
 
 const ChatInput: React.FC<Props> = ({ onSend, isLoading }) => {
   const [value, setValue] = useState('')
+  const [focused, setFocused] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const submit = useCallback(() => {
@@ -16,7 +17,6 @@ const ChatInput: React.FC<Props> = ({ onSend, isLoading }) => {
     if (!trimmed || isLoading) return
     onSend(trimmed)
     setValue('')
-    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -36,10 +36,9 @@ const ChatInput: React.FC<Props> = ({ onSend, isLoading }) => {
     const next = e.target.value
     if (next.length > MAX_CHARS) return
     setValue(next)
-    // Auto-expand up to 5 rows
     const el = e.target
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 130)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 136)}px`
   }
 
   const charsLeft = MAX_CHARS - value.length
@@ -47,61 +46,69 @@ const ChatInput: React.FC<Props> = ({ onSend, isLoading }) => {
 
   return (
     <form
-      onSubmit={(e) => {
-        e.preventDefault()
-        submit()
-      }}
+      onSubmit={(e) => { e.preventDefault(); submit() }}
       aria-label="Send a message"
     >
       <div
-        className={`flex items-end gap-2 bg-gray-50 border rounded-2xl px-3 py-2 transition-colors ${
-          isLoading ? 'border-gray-200' : 'border-gray-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-400'
-        }`}
+        className={`flex items-end gap-3 rounded-2xl px-4 py-3 border transition-all duration-200 ${
+          focused
+            ? 'bg-surface-card border-indigo-500/40 ring-glow'
+            : 'bg-surface-card border-white/[0.08] hover:border-white/[0.13]'
+        } ${isLoading ? 'opacity-70' : ''}`}
       >
         <textarea
           ref={textareaRef}
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about HR policies, leave, benefits…"
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder="Ask about leave, benefits, remote work, onboarding…"
           rows={1}
           disabled={isLoading}
           maxLength={MAX_CHARS}
           aria-label="Message input"
           aria-multiline="true"
-          aria-describedby="char-count"
-          className="flex-1 bg-transparent resize-none text-sm text-gray-800 placeholder-gray-400 focus:outline-none disabled:opacity-50 py-1 max-h-32 leading-relaxed"
+          aria-describedby="input-hint"
+          className="flex-1 bg-transparent resize-none text-[13px] text-slate-200 placeholder-slate-600 focus:outline-none disabled:opacity-50 leading-relaxed max-h-[136px] py-0.5"
         />
 
         <button
           type="submit"
           disabled={!canSend}
           aria-label={isLoading ? 'Sending…' : 'Send message'}
-          className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-colors mb-0.5 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300"
+          className={`flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-all duration-150 mb-0.5 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:ring-offset-1 focus:ring-offset-surface-card ${
+            canSend
+              ? 'bg-indigo-600 hover:bg-indigo-500 shadow-glow-sm cursor-pointer'
+              : 'bg-white/[0.06] cursor-not-allowed'
+          }`}
         >
           {isLoading ? (
-            <svg className="w-4 h-4 text-white animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <svg className="w-4 h-4 text-slate-400 animate-spin-slow" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
           ) : (
-            <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <svg
+              className={`w-4 h-4 transition-colors ${canSend ? 'text-white' : 'text-slate-600'}`}
+              fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"
+            >
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
             </svg>
           )}
         </button>
       </div>
 
-      <div className="flex justify-between mt-1 px-1">
-        <span className="text-xs text-gray-400">Shift+Enter for new line</span>
-        <span
-          id="char-count"
-          className={`text-xs ${charsLeft < 200 ? 'text-amber-500' : 'text-gray-400'}`}
-          aria-live="polite"
-          aria-label={`${charsLeft} characters remaining`}
-        >
-          {charsLeft < 200 ? `${charsLeft} left` : ''}
-        </span>
+      <div id="input-hint" className="flex items-center justify-between mt-1.5 px-1">
+        <span className="text-[10px] text-slate-700">↵ Send · Shift+↵ New line</span>
+        {charsLeft < 300 && (
+          <span
+            className={`text-[10px] tabular-nums ${charsLeft < 100 ? 'text-rose-500' : 'text-amber-600'}`}
+            aria-live="polite"
+          >
+            {charsLeft} left
+          </span>
+        )}
       </div>
     </form>
   )

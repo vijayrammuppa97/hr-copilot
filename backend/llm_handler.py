@@ -72,7 +72,8 @@ class LLMHandler:
         response = await self._client.chat(
             model=self._model,
             messages=messages,
-            options={"num_predict": 1024, "temperature": 0.3},
+            options={"num_predict": 400, "temperature": 0.3, "num_ctx": 2048},
+            stream=False,
         )
 
         answer = response.message.content.strip()
@@ -82,7 +83,7 @@ class LLMHandler:
     def _build_context(self, results: list[dict]) -> str:
         if not results:
             return "<policy_context>No matching policy sections found for this query.</policy_context>"
-        parts = [f"### {r['section']}\n{r['content']}" for r in results[:5]]
+        parts = [f"### {r['section']}\n{r['content']}" for r in results[:3]]
         body = "\n\n".join(parts)
         return f"<policy_context>\n{body}\n</policy_context>"
 

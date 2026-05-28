@@ -14,9 +14,10 @@ import logging
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +28,7 @@ from dotenv import load_dotenv
 
 from knowledge_loader import KnowledgeBase
 from llm_handler import LLMHandler
+from document_loader import parse_document, SUPPORTED_EXTENSIONS
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
 
@@ -143,6 +145,15 @@ class FeedbackResponse(BaseModel):
     status: str
 
 
+class UploadResponse(BaseModel):
+    filename: str
+    sections_added: int
+    total_kb_sections: int
+
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 # ── Exception handlers ───────────────────────────────────────────────────── #
 
 
@@ -221,6 +232,37 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         sources=sources,
         confidence=round(confidence, 2),
         timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.post("/api/upload", response_model=UploadResponse, tags=["documents"])
+@limiter.limit("5/minute")
+async def upload_document(request: Request, file: UploadFile = File(...)) -> UploadResponse:
+    filename = file.filename or "upload"
+    ext = Path(filename).suffix.lower()
+
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit")
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    sections = parse_document(data, filename)
+    if not sections:
+        raise HTTPException(status_code=422, detail="Could not extract any content from the file")
+
+    added = knowledge_base.add_sections(sections)
+    logger.info("upload filename=%r sections_added=%d total=%d", filename, added, knowledge_base.section_count)
+    return UploadResponse(
+        filename=filename,
+        sections_added=added,
+        total_kb_sections=knowledge_base.section_count,
     )
 
 
