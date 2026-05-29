@@ -5,7 +5,6 @@ import ChatInput from './components/ChatInput'
 import LoadingSkeleton from './components/LoadingSkeleton'
 import ErrorBoundary from './components/ErrorBoundary'
 import Sidebar from './components/Sidebar'
-import InsightPanel from './components/InsightPanel'
 
 const STORAGE_KEY        = 'hr_copilot_messages'
 const CONVERSATION_ID_KEY = 'hr_copilot_conversation_id'
@@ -123,6 +122,8 @@ const App: React.FC = () => {
 
     const body: ChatRequest = { message: trimmed, conversationId: conversationId.current }
 
+    const assistantId = generateId()
+
     try {
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: 'POST',
@@ -135,12 +136,44 @@ const App: React.FC = () => {
         try { const j = (await res.json()) as { detail?: string }; if (j.detail) detail = j.detail } catch { /* ok */ }
         throw new Error(detail)
       }
-      const data: ChatResponse = (await res.json()) as ChatResponse
+
+      // Stream tokens as they arrive
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      if (!reader) throw new Error('No response body')
+
+      setIsLoading(false) // hide skeleton — streaming starts now
       setMessages((prev) => [...prev, {
-        id: generateId(), role: 'assistant',
-        content: data.message, sources: data.sources,
-        confidence: data.confidence, timestamp: data.timestamp, feedback: null,
+        id: assistantId, role: 'assistant', content: '', sources: [],
+        confidence: 0, timestamp: new Date().toISOString(), feedback: null,
       }])
+
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const evt = JSON.parse(line.slice(6)) as { type: string; text?: string; sources?: string[]; confidence?: number; timestamp?: string; message?: string }
+            if (evt.type === 'token' && evt.text) {
+              setMessages((prev) => prev.map((m) =>
+                m.id === assistantId ? { ...m, content: m.content + evt.text } : m
+              ))
+            } else if (evt.type === 'done') {
+              setMessages((prev) => prev.map((m) =>
+                m.id === assistantId ? { ...m, sources: evt.sources ?? [], confidence: evt.confidence ?? 0, timestamp: evt.timestamp ?? m.timestamp } : m
+              ))
+            } else if (evt.type === 'error') {
+              throw new Error(evt.message ?? 'Stream error')
+            }
+          } catch { /* malformed line */ }
+        }
+      }
+      return
     } catch (err) {
       const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
@@ -154,7 +187,7 @@ const App: React.FC = () => {
         timestamp: new Date().toISOString(), isError: true,
       }])
     } finally {
-      setIsLoading(false)
+      setIsLoading(false)  // no-op if already cleared during streaming
     }
   }, [isLoading])
 
@@ -226,7 +259,6 @@ const App: React.FC = () => {
   }, [])
 
   const isEmpty = messages.length === 0 && !isLoading
-  const lastAssistantMessage = messages.filter((m) => m.role === 'assistant' && !m.isError).at(-1) ?? null
   const conversationPreview = messages.find((m) => m.role === 'user')?.content ?? ''
 
   return (
@@ -379,14 +411,6 @@ const App: React.FC = () => {
               </p>
             </div>
           </footer>
-        </div>
-
-        {/* ── Right Insight Panel ── */}
-        <div className="hidden xl:flex">
-          <InsightPanel
-            message={lastAssistantMessage}
-            onFeedback={handleFeedback}
-          />
         </div>
 
       </div>
