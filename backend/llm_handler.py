@@ -7,37 +7,23 @@ Ollama must be running: https://ollama.com
 """
 
 import logging
+from collections.abc import AsyncGenerator
 
 import ollama
 
 logger = logging.getLogger("hr_copilot.llm")
 
 _SYSTEM_PROMPT = """\
-You are an expert HR Knowledge Copilot for a large enterprise organization. \
-Your role is to provide accurate, helpful, and empathetic responses to employee \
-questions about company HR policies and procedures.
+You are a friendly, knowledgeable HR colleague. Help employees understand company policies \
+using ONLY the <policy_context> provided.
 
-## Core guidelines
-1. **Accuracy** — Answer only from the <policy_context> provided. Never invent \
-policies or figures.
-2. **Clarity** — Use plain language and structure answers with bullet points or \
-numbered steps when appropriate.
-3. **Empathy** — HR questions can be sensitive. Always be respectful and supportive.
-4. **Escalation** — For matters requiring confidential HR judgement, direct the \
-employee to HR (hr@company.com) or their HR Business Partner.
-5. **Boundaries** — Do not provide legal advice. Recommend HR/Legal consultation \
-for complex legal matters.
-6. **Completeness** — Be thorough but concise. Cite the policy section when \
-referencing a specific rule (e.g., "Per Section 3.2 — Remote Work Eligibility…").
-
-## Response format
-- Start directly with the answer. No preamble like "Based on the policy…".
-- Use bullet lists for multi-step processes.
-- Close with: "For further assistance, contact HR at hr@company.com or speak \
-with your HR Business Partner."
-- If the question is outside the provided context, respond: "I don't have \
-specific information on that topic. Please contact HR directly at \
-hr@company.com."
+- Respond naturally and conversationally — like a helpful colleague, not a FAQ page.
+- Use plain sentences. Only use bullet points when listing several distinct items is genuinely clearer.
+- Reference earlier parts of the conversation when it adds context.
+- Never invent or assume policies not in the context.
+- Keep answers focused: 2-4 sentences for simple questions, a short paragraph for complex ones.
+- Close with a natural offer to help further, or note they can confirm details at hr@company.com.
+- If the topic is not covered, say so naturally and direct them to hr@company.com.
 """
 
 
@@ -47,21 +33,14 @@ class LLMHandler:
         self._client = ollama.AsyncClient(host=host)
         logger.info("LLMHandler initialised — model=%s host=%s", model, host)
 
-    async def generate(
+    async def stream(
         self,
         user_message: str,
         kb_context: list[dict],
         history: list[dict[str, str]],
-    ) -> tuple[str, float]:
-        """
-        Call Ollama and return (response_text, confidence_score).
-
-        confidence_score is a heuristic derived from KB hit count.
-        """
+    ) -> AsyncGenerator[str, None]:
+        """Stream response tokens from Ollama one chunk at a time."""
         context_block = self._build_context(kb_context)
-        confidence = self._estimate_confidence(kb_context)
-
-        # Build messages: system prompt → prior history → current user message
         messages: list[dict[str, str]] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
         ]
@@ -69,25 +48,26 @@ class LLMHandler:
             messages.append({"role": turn["role"], "content": turn["content"]})
         messages.append({"role": "user", "content": f"{user_message}\n\n{context_block}"})
 
-        response = await self._client.chat(
+        async for chunk in await self._client.chat(
             model=self._model,
             messages=messages,
-            options={"num_predict": 400, "temperature": 0.3, "num_ctx": 2048},
-            stream=False,
-        )
-
-        answer = response.message.content.strip()
-        logger.debug("model=%s confidence=%.2f", self._model, confidence)
-        return answer, confidence
+            options={"num_predict": 600, "temperature": 0.45, "num_ctx": 4096},
+            stream=True,
+        ):
+            token = chunk.message.content
+            if token:
+                yield token
 
     def _build_context(self, results: list[dict]) -> str:
         if not results:
-            return "<policy_context>No matching policy sections found for this query.</policy_context>"
-        parts = [f"### {r['section']}\n{r['content']}" for r in results[:3]]
-        body = "\n\n".join(parts)
-        return f"<policy_context>\n{body}\n</policy_context>"
+            return "<policy_context>No matching policy sections found.</policy_context>"
+        parts = []
+        for r in results[:3]:
+            content = r["content"][:500]
+            parts.append(f"[{r['section']}]\n{content}")
+        return f"<policy_context>\n{'---'.join(parts)}\n</policy_context>"
 
-    def _estimate_confidence(self, results: list[dict]) -> float:
+    def estimate_confidence(self, results: list[dict]) -> float:
         if not results:
             return 0.20
         mapping = {1: 0.60, 2: 0.75, 3: 0.85, 4: 0.90}

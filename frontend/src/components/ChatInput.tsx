@@ -1,16 +1,25 @@
-import React, { useState, useRef, useCallback, KeyboardEvent, ChangeEvent } from 'react'
+import React, { useState, useRef, useCallback, useEffect, KeyboardEvent, ChangeEvent } from 'react'
 
 interface Props {
   onSend: (message: string) => void
   isLoading: boolean
+  prefill?: string
+  onPrefillConsumed?: () => void
 }
 
 const MAX_CHARS = 2000
 
-const ChatInput: React.FC<Props> = ({ onSend, isLoading }) => {
+const ChatInput: React.FC<Props> = ({ onSend, isLoading, prefill, onPrefillConsumed }) => {
   const [value, setValue] = useState('')
   const [focused, setFocused] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (!prefill) return
+    setValue(prefill)
+    textareaRef.current?.focus()
+    onPrefillConsumed?.()
+  }, [prefill, onPrefillConsumed])
 
   const submit = useCallback(() => {
     const trimmed = value.trim()

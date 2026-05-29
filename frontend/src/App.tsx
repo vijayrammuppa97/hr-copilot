@@ -96,6 +96,7 @@ const App: React.FC = () => {
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   const [uploadedFiles, setUploadedFiles]     = useState<UploadedFile[]>([])
   const [isUploading, setIsUploading]         = useState(false)
+  const [prefill, setPrefill]                 = useState('')
   const conversationId = useRef<string>(getOrCreateConversationId())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -269,7 +270,7 @@ const App: React.FC = () => {
         <div className="hidden lg:flex">
           <Sidebar
             onNewChat={clearChat}
-            onPromptSelect={(q) => void sendMessage(q)}
+            onPromptSelect={(q) => setPrefill(q)}
             hasMessages={messages.length > 0}
             conversationPreview={conversationPreview}
             uploadedFiles={uploadedFiles}
@@ -333,7 +334,7 @@ const App: React.FC = () => {
                       {WELCOME_PROMPTS.map((p) => (
                         <li key={p.label}>
                           <button
-                            onClick={() => void sendMessage(p.query)}
+                            onClick={() => setPrefill(p.query)}
                             className={`w-full flex items-start gap-3 p-4 rounded-xl bg-surface-card border border-white/[0.07] ${p.hoverBorder} transition-all duration-200 text-left group hover:scale-[1.01] active:scale-[0.99]`}
                           >
                             <div className={`w-8 h-8 rounded-lg border flex items-center justify-center flex-shrink-0 ${p.iconBg} ${p.accent} transition-transform group-hover:scale-105`}>
@@ -405,7 +406,7 @@ const App: React.FC = () => {
           {/* ── Input composer ── */}
           <footer className="border-t border-white/[0.06] bg-surface-base/80 backdrop-blur-xs px-6 py-4">
             <div className="max-w-3xl mx-auto">
-              <ChatInput onSend={sendMessage} isLoading={isLoading} />
+              <ChatInput onSend={sendMessage} isLoading={isLoading} prefill={prefill} onPrefillConsumed={() => setPrefill('')} />
               <p className="text-[10px] text-slate-700 text-center mt-2.5">
                 AI responses are grounded in Acme HR policy only. Verify important decisions with HR directly.
               </p>
