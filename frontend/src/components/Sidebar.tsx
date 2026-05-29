@@ -1,4 +1,6 @@
 import React, { useRef } from 'react'
+import { OnboardingCase } from '../types'
+import WorkflowProgress from './WorkflowProgress'
 
 interface UploadedFile {
   name: string
@@ -7,23 +9,20 @@ interface UploadedFile {
 
 interface Props {
   onNewChat: () => void
-  onPromptSelect: (query: string) => void
-  hasMessages: boolean
-  conversationPreview: string
+  case_: OnboardingCase | null
+  onStageClick: (stageId: string, stageName: string) => void
+  onCompleteItem: (stageId: string, itemId: string) => void
+  onEscalate: () => void
+  onAdvanceStage: () => void
   uploadedFiles: UploadedFile[]
   onUpload: (file: File) => void
   isUploading: boolean
 }
 
-const TOPICS = [
-  { label: 'Leave & Time Off',  query: 'What is the annual leave entitlement?',       accent: 'text-sky-400',     dot: 'bg-sky-400'     },
-  { label: 'Remote Work',       query: 'What is the remote work policy?',              accent: 'text-violet-400',  dot: 'bg-violet-400'  },
-  { label: 'Benefits',          query: 'What employee benefits are available?',         accent: 'text-emerald-400', dot: 'bg-emerald-400' },
-  { label: 'Onboarding',        query: 'What happens during onboarding?',               accent: 'text-amber-400',   dot: 'bg-amber-400'   },
-  { label: 'Escalation',        query: 'How do I escalate a workplace concern?',        accent: 'text-rose-400',    dot: 'bg-rose-400'    },
-]
-
-const Sidebar: React.FC<Props> = ({ onNewChat, onPromptSelect, hasMessages, conversationPreview, uploadedFiles, onUpload, isUploading }) => {
+const Sidebar: React.FC<Props> = ({
+  onNewChat, case_, onStageClick, onCompleteItem, onEscalate,
+  onAdvanceStage, uploadedFiles, onUpload, isUploading,
+}) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,96 +31,100 @@ const Sidebar: React.FC<Props> = ({ onNewChat, onPromptSelect, hasMessages, conv
     e.target.value = ''
   }
 
+  const currentStageData = case_?.workflow.find((s) => s.stage_id === case_.current_stage)
+  const currentStageComplete = currentStageData?.status === 'completed'
+  const isLastStage = case_?.current_stage === 'payroll_setup'
+  const allDone = case_?.status === 'completed'
+
   return (
     <aside
-      className="w-[224px] flex-shrink-0 flex flex-col h-screen bg-surface-panel border-r border-white/[0.06] select-none"
-      aria-label="Navigation sidebar"
+      className="w-[240px] flex-shrink-0 flex flex-col h-screen bg-surface-panel border-r border-white/[0.06] select-none overflow-y-auto scrollbar-dark"
+      aria-label="Onboarding sidebar"
     >
       {/* ── Logo ── */}
-      <div className="px-4 pt-5 pb-5">
+      <div className="px-4 pt-5 pb-4 flex-shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0 shadow-glow-sm">
-            <svg className="w-[14px] h-[14px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <svg className="w-[14px] h-[14px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
                 d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
           </div>
           <div className="min-w-0">
             <p className="text-[13px] font-semibold text-slate-100 leading-none tracking-tight">Acme HR</p>
-            <p className="text-[10px] text-slate-600 leading-none mt-[3px]">Knowledge Copilot</p>
+            <p className="text-[10px] text-slate-600 leading-none mt-[3px]">Onboarding Copilot</p>
           </div>
         </div>
       </div>
 
-      {/* ── New Chat ── */}
-      <div className="px-3 pb-4">
-        <button
-          onClick={onNewChat}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.07] hover:border-white/[0.12] transition-all duration-150 group"
-          aria-label="Start a new conversation"
-        >
-          <svg className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New conversation
-        </button>
-      </div>
+      {/* ── Employee card ── */}
+      {case_ && (
+        <div className="mx-3 mb-3 px-3 py-2.5 rounded-xl bg-indigo-500/[0.08] border border-indigo-500/[0.15] flex-shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-[12px] font-semibold text-slate-200 truncate">{case_.employee_name}</p>
+              <p className="text-[10px] text-slate-500 truncate mt-0.5">{case_.role || case_.employee_email}</p>
+            </div>
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+              case_.status === 'completed'  ? 'bg-emerald-400' :
+              case_.status === 'escalated'  ? 'bg-amber-400'   : 'bg-indigo-400'
+            }`} />
+          </div>
+          <div className="flex items-center gap-1.5 mt-2">
+            <span className="text-[9px] text-slate-600 font-mono">{case_.case_id}</span>
+          </div>
+        </div>
+      )}
 
       {/* ── Divider ── */}
-      <div className="h-px bg-white/[0.05] mx-3" />
+      <div className="h-px bg-white/[0.05] mx-3 mb-3 flex-shrink-0" />
 
-      {/* ── Recent ── */}
-      <div className="px-3 pt-4 pb-3">
-        <p className="text-[9px] font-semibold text-slate-600 uppercase tracking-[0.12em] mb-2 px-1">Recent</p>
-        {hasMessages ? (
-          <div
-            className="px-3 py-2.5 rounded-lg bg-indigo-500/[0.1] border border-indigo-500/[0.18] cursor-default"
-            role="listitem"
+      {/* ── Workflow progress ── */}
+      {case_ ? (
+        <div className="flex-shrink-0">
+          <WorkflowProgress
+            case_={case_}
+            onStageClick={onStageClick}
+            onCompleteItem={onCompleteItem}
+          />
+        </div>
+      ) : (
+        <div className="px-4 py-3">
+          <p className="text-xs text-slate-600">No active onboarding case</p>
+        </div>
+      )}
+
+      {/* ── Advance stage button ── */}
+      {case_ && currentStageComplete && !allDone && (
+        <div className="px-3 mt-3 flex-shrink-0">
+          <button
+            onClick={onAdvanceStage}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-emerald-300 bg-emerald-500/[0.1] hover:bg-emerald-500/20 border border-emerald-500/20 hover:border-emerald-500/30 transition-all"
           >
-            <p className="text-xs text-slate-300 truncate leading-snug">
-              {conversationPreview || 'Current conversation'}
-            </p>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" aria-hidden="true" />
-              <p className="text-[10px] text-slate-600">Active now</p>
-            </div>
-          </div>
-        ) : (
-          <p className="text-xs text-slate-700 px-1 py-1">No conversations yet</p>
-        )}
-      </div>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+            {isLastStage ? 'Complete Onboarding' : 'Next Stage →'}
+          </button>
+        </div>
+      )}
+
+      {/* Completed banner */}
+      {allDone && (
+        <div className="mx-3 mt-3 px-3 py-2.5 rounded-xl bg-emerald-500/[0.1] border border-emerald-500/20 flex-shrink-0">
+          <p className="text-xs text-emerald-400 font-medium text-center">🎉 Onboarding Complete!</p>
+        </div>
+      )}
 
       {/* ── Spacer ── */}
       <div className="flex-1" />
 
       {/* ── Divider ── */}
-      <div className="h-px bg-white/[0.05] mx-3" />
-
-      {/* ── Topics ── */}
-      <div className="px-3 pt-4 pb-3">
-        <p className="text-[9px] font-semibold text-slate-600 uppercase tracking-[0.12em] mb-2 px-1">Topics</p>
-        <nav aria-label="Policy topics">
-          <ul className="space-y-0.5 list-none p-0 m-0">
-            {TOPICS.map((t) => (
-              <li key={t.label}>
-                <button
-                  onClick={() => onPromptSelect(t.query)}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-slate-500 hover:text-slate-200 hover:bg-white/[0.05] transition-all duration-150 text-left group"
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${t.dot} opacity-70 group-hover:opacity-100 flex-shrink-0 transition-opacity`} aria-hidden="true" />
-                  <span className={`text-xs transition-colors group-hover:${t.accent.replace('text-', 'text-')}`}>{t.label}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </nav>
-      </div>
+      <div className="h-px bg-white/[0.05] mx-3 mt-3 flex-shrink-0" />
 
       {/* ── Documents ── */}
-      <div className="px-3 pb-3">
-        <div className="h-px bg-white/[0.05] mb-3" />
+      <div className="px-3 pt-3 pb-2 flex-shrink-0">
         <p className="text-[9px] font-semibold text-slate-600 uppercase tracking-[0.12em] mb-2 px-1">Documents</p>
-
         <input
           ref={fileInputRef}
           type="file"
@@ -130,31 +133,28 @@ const Sidebar: React.FC<Props> = ({ onNewChat, onPromptSelect, hasMessages, conv
           onChange={handleFileChange}
           aria-hidden="true"
         />
-
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={isUploading}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-200 bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.11] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed group"
-          aria-label="Upload a document to the knowledge base"
         >
           {isUploading ? (
-            <svg className="w-3.5 h-3.5 text-indigo-400 animate-spin-slow flex-shrink-0" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <svg className="w-3.5 h-3.5 text-indigo-400 animate-spin-slow flex-shrink-0" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
           ) : (
-            <svg className="w-3.5 h-3.5 text-slate-600 group-hover:text-indigo-400 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <svg className="w-3.5 h-3.5 text-slate-600 group-hover:text-indigo-400 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
             </svg>
           )}
           <span className="truncate">{isUploading ? 'Uploading…' : 'Attach document'}</span>
         </button>
-
         {uploadedFiles.length > 0 && (
-          <ul className="mt-2 space-y-1 list-none p-0 m-0" aria-label="Uploaded documents">
+          <ul className="mt-1.5 space-y-1 list-none p-0 m-0">
             {uploadedFiles.map((f) => (
               <li key={f.name} className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-white/[0.03]">
-                <svg className="w-3 h-3 text-slate-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <svg className="w-3 h-3 text-slate-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
                 <span className="text-[10px] text-slate-500 truncate flex-1 min-w-0">{f.name}</span>
@@ -165,10 +165,40 @@ const Sidebar: React.FC<Props> = ({ onNewChat, onPromptSelect, hasMessages, conv
         )}
       </div>
 
+      {/* ── Escalation + New Chat ── */}
+      <div className="px-3 pb-3 flex-shrink-0 space-y-2">
+        {case_ && case_.status !== 'escalated' && (
+          <button
+            onClick={onEscalate}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-amber-500 hover:text-amber-300 bg-amber-500/[0.06] hover:bg-amber-500/[0.12] border border-amber-500/[0.12] hover:border-amber-500/25 transition-all group"
+          >
+            <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            Get Human Help
+          </button>
+        )}
+        {case_?.status === 'escalated' && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+            <span className="text-[11px] text-amber-400">Escalated — HR will contact you</span>
+          </div>
+        )}
+        <button
+          onClick={onNewChat}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.07] transition-all group"
+        >
+          <svg className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+          New Chat
+        </button>
+      </div>
+
       {/* ── Model badge ── */}
-      <div className="px-3 pb-5">
+      <div className="px-3 pb-4 flex-shrink-0">
         <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-white/[0.03] border border-white/[0.05]">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" aria-hidden="true" />
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
           <span className="text-[10px] text-slate-600 truncate">llama3.2 · Local · No API key</span>
         </div>
       </div>

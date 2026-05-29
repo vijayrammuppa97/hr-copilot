@@ -13,16 +13,32 @@ import ollama
 
 logger = logging.getLogger("hr_copilot.llm")
 
-_SYSTEM_PROMPT = """\
+_BASE_SYSTEM_PROMPT = """\
+You are a friendly, knowledgeable HR Onboarding Assistant. \
+Help employees navigate their onboarding journey using the context provided.
+
+- Respond naturally and conversationally — like a warm, helpful colleague, not a FAQ page.
+- Use plain sentences; only use bullet points when listing several distinct items is genuinely clearer.
+- Address the employee by their first name occasionally to keep it personal.
+- Reference earlier parts of the conversation when it adds context.
+- Never invent policies or process steps not provided to you.
+- Keep responses focused: 2-4 sentences for simple questions, a short paragraph for complex ones.
+- If they seem frustrated or explicitly ask for a human, acknowledge it warmly and tell them \
+  to click the "Get Human Help" button or you can note their escalation.
+- If something requires official HR confirmation, say so honestly.
+- Close with a natural offer to help with the next step.
+"""
+
+_GENERAL_HR_PROMPT = """\
 You are a friendly, knowledgeable HR colleague. Help employees understand company policies \
 using ONLY the <policy_context> provided.
 
-- Respond naturally and conversationally — like a helpful colleague, not a FAQ page.
-- Use plain sentences. Only use bullet points when listing several distinct items is genuinely clearer.
-- Reference earlier parts of the conversation when it adds context.
-- Never invent or assume policies not in the context.
-- Keep answers focused: 2-4 sentences for simple questions, a short paragraph for complex ones.
-- Close with a natural offer to help further, or note they can confirm details at hr@company.com.
+- Respond naturally and conversationally — not as a list of rules.
+- Use plain sentences; only use bullet points when listing multiple distinct items makes things clearer.
+- Reference what was said earlier in the conversation when relevant.
+- Never invent or assume policies not present in the context.
+- Keep responses focused — 2-4 sentences for simple questions, a short paragraph for complex ones.
+- End each response with a brief, natural offer to help further or a pointer to hr@company.com for confirmation.
 - If the topic is not covered, say so naturally and direct them to hr@company.com.
 """
 
@@ -38,15 +54,19 @@ class LLMHandler:
         user_message: str,
         kb_context: list[dict],
         history: list[dict[str, str]],
+        case_context: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Stream response tokens from Ollama one chunk at a time."""
-        context_block = self._build_context(kb_context)
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-        ]
+        if case_context:
+            system_content = f"{_BASE_SYSTEM_PROMPT}\n\n{case_context}"
+        else:
+            system_content = _GENERAL_HR_PROMPT
+
+        kb_block = self._build_kb_block(kb_context)
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
         for turn in history:
             messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": f"{user_message}\n\n{context_block}"})
+        messages.append({"role": "user", "content": f"{user_message}\n\n{kb_block}" if kb_block else user_message})
 
         async for chunk in await self._client.chat(
             model=self._model,
@@ -58,9 +78,9 @@ class LLMHandler:
             if token:
                 yield token
 
-    def _build_context(self, results: list[dict]) -> str:
+    def _build_kb_block(self, results: list[dict]) -> str:
         if not results:
-            return "<policy_context>No matching policy sections found.</policy_context>"
+            return ""
         parts = []
         for r in results[:3]:
             content = r["content"][:500]

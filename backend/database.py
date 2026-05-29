@@ -55,8 +55,64 @@ def init_db() -> None:
                 timestamp       TEXT    NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_messages_cid ON messages(conversation_id);
-            CREATE INDEX IF NOT EXISTS idx_feedback_cid ON feedback(conversation_id);
+            -- Onboarding case per new hire
+            CREATE TABLE IF NOT EXISTS onboarding_cases (
+                case_id        TEXT PRIMARY KEY,
+                employee_name  TEXT NOT NULL,
+                employee_email TEXT NOT NULL,
+                employee_id    TEXT DEFAULT '',
+                department     TEXT DEFAULT '',
+                role           TEXT DEFAULT '',
+                manager_name   TEXT DEFAULT '',
+                start_date     TEXT DEFAULT '',
+                current_stage  TEXT DEFAULT 'document_collection',
+                status         TEXT DEFAULT 'active',
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
+            -- Per-item completion tracking across all 7 stages
+            CREATE TABLE IF NOT EXISTS case_workflow_steps (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id      TEXT NOT NULL,
+                stage_id     TEXT NOT NULL,
+                item_id      TEXT NOT NULL,
+                status       TEXT DEFAULT 'pending',
+                notes        TEXT DEFAULT '',
+                completed_at TEXT,
+                FOREIGN KEY (case_id) REFERENCES onboarding_cases(case_id)
+            );
+
+            -- Documents uploaded per case
+            CREATE TABLE IF NOT EXISTS case_documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id     TEXT NOT NULL,
+                doc_type    TEXT NOT NULL,
+                filename    TEXT DEFAULT '',
+                status      TEXT DEFAULT 'uploaded',
+                uploaded_at TEXT NOT NULL,
+                FOREIGN KEY (case_id) REFERENCES onboarding_cases(case_id)
+            );
+
+            -- Escalations raised by employee or system
+            CREATE TABLE IF NOT EXISTS escalations (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id       TEXT NOT NULL,
+                reason        TEXT NOT NULL,
+                status        TEXT DEFAULT 'open',
+                escalated_by  TEXT DEFAULT 'employee',
+                assigned_to   TEXT DEFAULT '',
+                created_at    TEXT NOT NULL,
+                resolved_at   TEXT,
+                notes         TEXT DEFAULT '',
+                FOREIGN KEY (case_id) REFERENCES onboarding_cases(case_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_messages_cid   ON messages(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_feedback_cid   ON feedback(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_steps_case     ON case_workflow_steps(case_id);
+            CREATE INDEX IF NOT EXISTS idx_docs_case      ON case_documents(case_id);
+            CREATE INDEX IF NOT EXISTS idx_escl_case      ON escalations(case_id);
         """)
     logger.info("SQLite database ready at %s", DB_PATH)
 
