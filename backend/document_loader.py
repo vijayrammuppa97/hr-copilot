@@ -1,12 +1,20 @@
 """
-Parses uploaded documents into searchable KB sections.
+Parses uploaded documents into searchable KB sections using
+recursive chunking with overlap.
+
+Chunking strategy:
+  - Try to split on paragraph boundaries (\n\n)
+  - Fall back to sentence boundaries (. )
+  - Fall back to word boundaries ( )
+  - Chunk size: 400 characters | Overlap: 80 characters
+  - Minimum chunk length: 60 characters
 
 Supported formats:
-  .pdf   — extracts text per page (requires pypdf)
-  .docx  — extracts paragraphs grouped by heading (requires python-docx)
-  .csv   — each row becomes a searchable entry
-  .txt   — split on double newlines
-  .md    — parsed on markdown headings (same as knowledge_base.md)
+  .pdf   — page-aware extraction then chunk
+  .docx  — heading-grouped paragraphs then chunk
+  .csv   — one row per section
+  .txt   — recursive chunk
+  .md    — heading-split then chunk long sections
 """
 
 import csv
@@ -17,34 +25,83 @@ from pathlib import Path
 
 logger = logging.getLogger("hr_copilot.docs")
 
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".csv", ".txt", ".md", ".text"}
 
-# ── Internal helpers ──────────────────────────────────────────────────────── #
+CHUNK_SIZE    = 400   # characters
+CHUNK_OVERLAP = 80    # characters
+MIN_CHUNK_LEN = 60    # skip tiny fragments
 
-def _chunks(text: str, filename: str, min_len: int = 40) -> list[dict]:
-    """Split plain text on blank lines into sections."""
-    stem = Path(filename).stem
-    parts = re.split(r"\n{2,}", text.strip())
+
+# ── Recursive chunker ─────────────────────────────────────────────────────── #
+
+def _recursive_chunk(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """
+    Split text into overlapping chunks respecting natural boundaries.
+    Priority order: paragraph > sentence > word boundary.
+    """
+    text = text.strip()
+    if len(text) <= size:
+        return [text] if len(text) >= MIN_CHUNK_LEN else []
+
+    separators = ["\n\n", "\n", ". ", " "]
+    chunks: list[str] = []
+
+    def _split(block: str, depth: int = 0) -> None:
+        if len(block) <= size or depth >= len(separators):
+            if len(block) >= MIN_CHUNK_LEN:
+                chunks.append(block.strip())
+            return
+
+        sep = separators[depth]
+        parts = block.split(sep)
+        current = ""
+        for part in parts:
+            candidate = (current + sep + part).strip() if current else part.strip()
+            if len(candidate) <= size:
+                current = candidate
+            else:
+                if current and len(current) >= MIN_CHUNK_LEN:
+                    chunks.append(current.strip())
+                    # Start next chunk with overlap
+                    words = current.split()
+                    overlap_text = " ".join(words[-max(1, overlap // 6):])
+                    current = (overlap_text + sep + part).strip()
+                else:
+                    _split(part, depth + 1)
+                    current = part.strip()
+        if current and len(current) >= MIN_CHUNK_LEN:
+            chunks.append(current.strip())
+
+    _split(text)
+    return chunks if chunks else [text[:size]]
+
+
+def _make_sections(chunks: list[str], stem: str, base_heading: str) -> list[dict]:
+    """Convert text chunks into {section, content} dicts."""
     sections = []
-    for i, part in enumerate(parts):
-        part = part.strip()
-        if len(part) >= min_len:
-            # Use the first line as the section heading
-            lines = part.splitlines()
-            heading = lines[0][:80] if lines else f"{stem} §{i + 1}"
-            sections.append({"section": f"{stem} — {heading}", "content": part})
+    for i, chunk in enumerate(chunks):
+        if len(chunks) == 1:
+            label = f"{stem} — {base_heading}"
+        else:
+            label = f"{stem} — {base_heading} (part {i + 1})"
+        sections.append({"section": label, "content": chunk})
     return sections
 
 
+# ── Format-specific parsers ───────────────────────────────────────────────── #
+
 def _parse_markdown(text: str, filename: str) -> list[dict]:
-    """Reuse same heading-split logic as knowledge_loader."""
-    stem = Path(filename).stem
-    heading_re = re.compile(r"^#{1,3}\s+(.+)$")
-    sections, current_heading, lines = [], f"{stem}", []
+    stem        = Path(filename).stem
+    heading_re  = re.compile(r"^#{1,3}\s+(.+)$")
+    sections: list[dict] = []
+    current_heading = stem
+    lines: list[str] = []
 
     def flush() -> None:
         body = "\n".join(lines).strip()
         if body:
-            sections.append({"section": current_heading, "content": body})
+            for s in _make_sections(_recursive_chunk(body), stem, current_heading):
+                sections.append(s)
 
     for line in text.splitlines():
         m = heading_re.match(line)
@@ -53,9 +110,9 @@ def _parse_markdown(text: str, filename: str) -> list[dict]:
             current_heading = m.group(1).strip()
             lines = []
         else:
-            s = line.strip()
-            if s:
-                lines.append(s)
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
     flush()
     return sections
 
@@ -69,12 +126,15 @@ def _parse_pdf(data: bytes, filename: str) -> list[dict]:
 
     stem = Path(filename).stem
     reader = PdfReader(io.BytesIO(data))
-    sections = []
+    sections: list[dict] = []
     for i, page in enumerate(reader.pages):
         text = (page.extract_text() or "").strip()
-        if len(text) >= 40:
-            sections.append({"section": f"{stem} — Page {i + 1}", "content": text})
-    logger.info("Parsed %d pages from PDF %s", len(sections), filename)
+        if len(text) < MIN_CHUNK_LEN:
+            continue
+        heading = f"Page {i + 1}"
+        for s in _make_sections(_recursive_chunk(text), stem, heading):
+            sections.append(s)
+    logger.info("Parsed %d chunks from PDF %s", len(sections), filename)
     return sections
 
 
@@ -86,13 +146,16 @@ def _parse_docx(data: bytes, filename: str) -> list[dict]:
         return []
 
     stem = Path(filename).stem
-    doc = Document(io.BytesIO(data))
-    sections, current_heading, paras = [], stem, []
+    doc  = Document(io.BytesIO(data))
+    sections: list[dict] = []
+    current_heading = stem
+    paras: list[str] = []
 
     def flush() -> None:
         body = "\n".join(paras).strip()
         if body:
-            sections.append({"section": current_heading, "content": body})
+            for s in _make_sections(_recursive_chunk(body), stem, current_heading):
+                sections.append(s)
 
     for para in doc.paragraphs:
         if para.style.name.startswith("Heading") and para.text.strip():
@@ -101,45 +164,48 @@ def _parse_docx(data: bytes, filename: str) -> list[dict]:
             paras = []
         elif para.text.strip():
             paras.append(para.text.strip())
-
     flush()
-    logger.info("Parsed %d sections from DOCX %s", len(sections), filename)
+    logger.info("Parsed %d chunks from DOCX %s", len(sections), filename)
     return sections
 
 
 def _parse_csv(data: bytes, filename: str) -> list[dict]:
-    stem = Path(filename).stem
-    text = data.decode("utf-8-sig", errors="replace")
+    stem   = Path(filename).stem
+    text   = data.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
-    sections = []
-
+    sections: list[dict] = []
     for i, row in enumerate(reader):
-        # Build readable text from all non-empty columns
         pairs = [f"{k}: {v}" for k, v in row.items() if v and str(v).strip()]
         if not pairs:
             continue
-        content = " | ".join(pairs)
-        # Use first column value as a heading if available
-        first_val = next(iter(row.values()), "")
-        heading = str(first_val)[:60] if first_val else f"Row {i + 1}"
+        content    = " | ".join(pairs)
+        first_val  = next(iter(row.values()), "")
+        heading    = str(first_val)[:60] if first_val else f"Row {i + 1}"
         sections.append({"section": f"{stem} — {heading}", "content": content})
-
     logger.info("Parsed %d rows from CSV %s", len(sections), filename)
+    return sections
+
+
+def _parse_txt(data: bytes, filename: str) -> list[dict]:
+    stem     = Path(filename).stem
+    text     = data.decode("utf-8", errors="replace")
+    sections: list[dict] = []
+    # Split on double newlines to get paragraphs, then chunk each
+    paras = re.split(r"\n{2,}", text.strip())
+    for i, para in enumerate(paras):
+        para = para.strip()
+        if len(para) < MIN_CHUNK_LEN:
+            continue
+        heading = para.splitlines()[0][:80] if para.splitlines() else f"Section {i + 1}"
+        for s in _make_sections(_recursive_chunk(para), stem, heading):
+            sections.append(s)
     return sections
 
 
 # ── Public API ────────────────────────────────────────────────────────────── #
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".csv", ".txt", ".md", ".text"}
-
-
 def parse_document(data: bytes, filename: str) -> list[dict]:
-    """
-    Parse an uploaded file into a list of {section, content} dicts.
-    Returns empty list if the format is unsupported or parsing fails.
-    """
     ext = Path(filename).suffix.lower()
-
     if ext == ".pdf":
         return _parse_pdf(data, filename)
     if ext == ".docx":
@@ -149,7 +215,6 @@ def parse_document(data: bytes, filename: str) -> list[dict]:
     if ext in {".md", ".markdown"}:
         return _parse_markdown(data.decode("utf-8", errors="replace"), filename)
     if ext in {".txt", ".text", ""}:
-        return _chunks(data.decode("utf-8", errors="replace"), filename)
-
+        return _parse_txt(data, filename)
     logger.warning("Unsupported file type: %s", ext)
     return []

@@ -1,11 +1,10 @@
-import React, { useRef } from 'react'
+import React, { useRef, useState } from 'react'
 import { OnboardingCase } from '../types'
 import WorkflowProgress from './WorkflowProgress'
+import SessionHistory from './SessionHistory'
 
-interface UploadedFile {
-  name: string
-  sections: number
-}
+interface UploadedFile { name: string; sections: number }
+interface UserSession { session_id: string; started_at: string; updated_at: string; message_count: number; preview: string | null }
 
 interface Props {
   onNewChat: () => void
@@ -14,16 +13,23 @@ interface Props {
   onCompleteItem: (stageId: string, itemId: string) => void
   onEscalate: () => void
   onAdvanceStage: () => void
+  onOpenAdmin: () => void
   uploadedFiles: UploadedFile[]
   onUpload: (file: File) => void
   isUploading: boolean
+  username: string
+  userSessions: UserSession[]
+  activeSessionId: string
+  onSelectSession: (sessionId: string) => void
 }
 
 const Sidebar: React.FC<Props> = ({
   onNewChat, case_, onStageClick, onCompleteItem, onEscalate,
-  onAdvanceStage, uploadedFiles, onUpload, isUploading,
+  onAdvanceStage, onOpenAdmin, uploadedFiles, onUpload, isUploading,
+  username, userSessions, activeSessionId, onSelectSession,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [showSessions, setShowSessions] = useState(false)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -43,18 +49,32 @@ const Sidebar: React.FC<Props> = ({
     >
       {/* ── Logo ── */}
       <div className="px-4 pt-5 pb-4 flex-shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0 shadow-glow-sm">
-            <svg className="w-[14px] h-[14px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        <div className="flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center flex-shrink-0 shadow-glow-sm">
+              <svg className="w-[14px] h-[14px] text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <p className="text-[13px] font-semibold text-slate-100 leading-none tracking-tight">Acme HR</p>
+              <p className="text-[10px] text-slate-600 leading-none mt-[3px]">Onboarding Copilot</p>
+            </div>
+          </div>
+          <button onClick={onOpenAdmin} title="Admin portal" className="w-6 h-6 flex items-center justify-center rounded-md text-slate-600 hover:text-indigo-400 hover:bg-white/[0.05] transition-all">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
-          </div>
-          <div className="min-w-0">
-            <p className="text-[13px] font-semibold text-slate-100 leading-none tracking-tight">Acme HR</p>
-            <p className="text-[10px] text-slate-600 leading-none mt-[3px]">Onboarding Copilot</p>
-          </div>
+          </button>
         </div>
+        {/* User identity */}
+        {username && (
+          <div className="mt-3 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+            <span className="text-[10px] text-slate-500 font-mono truncate">{username}</span>
+          </div>
+        )}
       </div>
 
       {/* ── Employee card ── */}
@@ -121,6 +141,25 @@ const Sidebar: React.FC<Props> = ({
 
       {/* ── Divider ── */}
       <div className="h-px bg-white/[0.05] mx-3 mt-3 flex-shrink-0" />
+
+      {/* ── Session history ── */}
+      <div className="px-3 pb-3 flex-shrink-0">
+        <div className="h-px bg-white/[0.05] mb-3" />
+        <button
+          onClick={() => setShowSessions((v) => !v)}
+          className="w-full flex items-center justify-between mb-2 group"
+        >
+          <p className="text-[9px] font-semibold text-slate-600 uppercase tracking-[0.12em] group-hover:text-slate-400 transition-colors">
+            Session History
+          </p>
+          <svg className={`w-2.5 h-2.5 text-slate-700 transition-transform ${showSessions ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+        {showSessions && (
+          <SessionHistory sessions={userSessions} activeSessionId={activeSessionId} onSelectSession={onSelectSession} />
+        )}
+      </div>
 
       {/* ── Documents ── */}
       <div className="px-3 pt-3 pb-2 flex-shrink-0">

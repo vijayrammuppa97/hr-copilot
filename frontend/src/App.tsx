@@ -5,12 +5,14 @@ import ChatInput from './components/ChatInput'
 import LoadingSkeleton from './components/LoadingSkeleton'
 import ErrorBoundary from './components/ErrorBoundary'
 import Sidebar from './components/Sidebar'
-import UserIdentityModal from './components/UserIdentityModal'
 import EscalationModal from './components/EscalationModal'
+import AdminDashboard from './components/AdminDashboard'
 
-const STORAGE_KEY        = 'hr_copilot_messages'
+const STORAGE_KEY         = 'hr_copilot_messages'
 const CONVERSATION_ID_KEY = 'hr_copilot_conversation_id'
 const CASE_ID_KEY         = 'hr_copilot_case_id'
+const USER_ID_KEY         = 'hr_copilot_user_id'
+const USERNAME_KEY        = 'hr_copilot_username'
 const API_BASE            = import.meta.env.VITE_API_URL ?? ''
 
 function generateId(): string {
@@ -38,66 +40,81 @@ function buildWelcomeMessage(case_: OnboardingCase): Message {
   const totalDone  = case_.workflow.reduce((s, st) => s + st.completed_items, 0)
   const totalItems = case_.workflow.reduce((s, st) => s + st.total_items, 0)
   const isReturning = totalDone > 0
-
   const content = isReturning
-    ? `Welcome back, ${firstName}! You've completed ${totalDone} of ${totalItems} onboarding tasks so far. You're currently on **${stageName}**. Let's pick up where you left off — what would you like to work on?`
-    : `Hi ${firstName}, welcome to Acme! 🎉 I'm your HR Onboarding Assistant and I'll guide you through every step of joining the team.\n\nYour Case ID is **${case_.case_id}** — keep this handy for any HR queries.\n\nYou have **7 stages** to complete, starting with **${stageName}**. I'll walk you through each one. Ready to get started?`
-
-  return {
-    id: generateId(),
-    role: 'assistant',
-    content,
-    timestamp: new Date().toISOString(),
-  }
+    ? `Welcome back, ${firstName}! You've completed ${totalDone} of ${totalItems} onboarding tasks. Currently on **${stageName}** — let's pick up where you left off.`
+    : `Hi ${firstName}, welcome to Acme! I'm your HR Onboarding Assistant.\n\nYour Case ID is **${case_.case_id}** — keep this for any HR queries. You have **7 stages** to complete, starting with **${stageName}**. Ready to get started?`
+  return { id: generateId(), role: 'assistant', content, timestamp: new Date().toISOString() }
 }
 
-interface UploadedFile {
-  name: string
-  sections: number
+interface UploadedFile { name: string; sections: number }
+
+interface UserSession {
+  session_id: string
+  started_at: string
+  updated_at: string
+  message_count: number
+  preview: string | null
 }
 
 const App: React.FC = () => {
-  const [messages, setMessages]                 = useState<Message[]>(loadPersistedMessages)
-  const [isLoading, setIsLoading]               = useState(false)
-  const [error, setError]                       = useState<string | null>(null)
+  const [messages, setMessages]                   = useState<Message[]>(loadPersistedMessages)
+  const [isLoading, setIsLoading]                 = useState(false)
+  const [error, setError]                         = useState<string | null>(null)
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
-  const [uploadedFiles, setUploadedFiles]       = useState<UploadedFile[]>([])
-  const [isUploading, setIsUploading]           = useState(false)
-  const [prefill, setPrefill]                   = useState('')
-  const [onboardingCase, setOnboardingCase]     = useState<OnboardingCase | null>(null)
-  const [showIdentityModal, setShowIdentityModal] = useState(false)
-  const [showEscalation, setShowEscalation]     = useState(false)
-  const [caseLoading, setCaseLoading]           = useState(true)
+  const [uploadedFiles, setUploadedFiles]         = useState<UploadedFile[]>([])
+  const [isUploading, setIsUploading]             = useState(false)
+  const [prefill, setPrefill]                     = useState('')
+  const [onboardingCase, setOnboardingCase]       = useState<OnboardingCase | null>(null)
+  const [showEscalation, setShowEscalation]       = useState(false)
+  const [showAdmin, setShowAdmin]                 = useState(false)
+  const [caseLoading, setCaseLoading]             = useState(true)
+  const [userId, setUserId]                       = useState<string>('')
+  const [username, setUsername]                   = useState<string>('')
+  const [userSessions, setUserSessions]           = useState<UserSession[]>([])
   const conversationId = useRef<string>(getOrCreateConversationId())
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // ── Register / restore user on mount ─────────────────────────────────── //
+  useEffect(() => {
+    const storedId   = localStorage.getItem(USER_ID_KEY)   ?? ''
+    const storedName = localStorage.getItem(USERNAME_KEY)  ?? ''
+
+    fetch(`${API_BASE}/api/users/register`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ user_id: storedId || undefined, username: storedName || undefined }),
+    })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: { user_id: string; username: string } | null) => {
+        if (data) {
+          setUserId(data.user_id)
+          setUsername(data.username)
+          localStorage.setItem(USER_ID_KEY,  data.user_id)
+          localStorage.setItem(USERNAME_KEY, data.username)
+          // Load session history
+          return fetch(`${API_BASE}/api/users/${data.user_id}/sessions`)
+            .then((r) => r.ok ? r.json() : [])
+            .then((sessions: UserSession[]) => setUserSessions(sessions))
+        }
+      })
+      .catch(() => { /* best-effort */ })
+  }, [])
 
   // ── Load case on mount ───────────────────────────────────────────────── //
   useEffect(() => {
     const storedCaseId = localStorage.getItem(CASE_ID_KEY)
-    if (!storedCaseId) {
-      setCaseLoading(false)
-      setShowIdentityModal(true)
-      return
-    }
+    if (!storedCaseId) { setCaseLoading(false); return }
     fetch(`${API_BASE}/api/cases/${storedCaseId}`)
       .then((r) => r.ok ? r.json() : null)
       .then((data: OnboardingCase | null) => {
         if (data) {
           setOnboardingCase(data)
-          // Add welcome message if chat is empty
-          if (loadPersistedMessages().length === 0) {
-            const welcome = buildWelcomeMessage(data)
-            setMessages([welcome])
-          }
+          if (loadPersistedMessages().length === 0) setMessages([buildWelcomeMessage(data)])
         } else {
           localStorage.removeItem(CASE_ID_KEY)
-          setShowIdentityModal(true)
         }
       })
-      .catch(() => {
-        setCaseLoading(false)
-        setShowIdentityModal(true)
-      })
+      .catch(() => { /* general HR mode */ })
       .finally(() => setCaseLoading(false))
   }, [])
 
@@ -109,82 +126,56 @@ const App: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
 
-  // ── Case created ─────────────────────────────────────────────────────── //
-  const handleCaseCreated = useCallback((case_: OnboardingCase) => {
-    localStorage.setItem(CASE_ID_KEY, case_.case_id)
-    setOnboardingCase(case_)
-    setShowIdentityModal(false)
-    const welcome = buildWelcomeMessage(case_)
-    setMessages([welcome])
-  }, [])
-
-  // ── Refresh case from backend ─────────────────────────────────────────── //
+  // ── Refresh case ─────────────────────────────────────────────────────── //
   const refreshCase = useCallback(async (caseId: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/cases/${caseId}`)
-      if (res.ok) {
-        const data = (await res.json()) as OnboardingCase
-        setOnboardingCase(data)
-      }
+      if (res.ok) setOnboardingCase((await res.json()) as OnboardingCase)
     } catch { /* best-effort */ }
   }, [])
 
-  // ── Complete checklist item ────────────────────────────────────────────── //
+  // ── Complete checklist item ───────────────────────────────────────────── //
   const handleCompleteItem = useCallback(async (stageId: string, itemId: string) => {
     if (!onboardingCase) return
-    try {
-      const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/complete-item`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stage_id: stageId, item_id: itemId }),
-      })
-      if (res.ok) {
-        const updated = (await res.json()) as OnboardingCase
-        setOnboardingCase(updated)
-        // Let the bot acknowledge it
-        const stage = updated.workflow.find((s) => s.stage_id === stageId)
-        const item  = stage?.items.find((i) => i.id === itemId)
-        if (item) {
-          void sendMessage(`I've marked "${item.label}" as complete.`)
-        }
-      }
-    } catch { /* best-effort */ }
+    const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/complete-item`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ stage_id: stageId, item_id: itemId }),
+    }).catch(() => null)
+    if (res?.ok) {
+      const updated = (await res.json()) as OnboardingCase
+      setOnboardingCase(updated)
+      const stage = updated.workflow.find((s) => s.stage_id === stageId)
+      const item  = stage?.items.find((i) => i.id === itemId)
+      if (item) void sendMessage(`I've marked "${item.label}" as complete.`)
+    }
   }, [onboardingCase]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Advance stage ─────────────────────────────────────────────────────── //
   const handleAdvanceStage = useCallback(async () => {
     if (!onboardingCase) return
-    try {
-      const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/advance-stage`, {
-        method: 'POST',
-      })
-      if (res.ok) {
-        const updated = (await res.json()) as OnboardingCase
-        setOnboardingCase(updated)
-        const nextStage = updated.workflow.find((s) => s.stage_id === updated.current_stage)
-        const msg = updated.status === 'completed'
-          ? "I've completed all onboarding stages! What else can I help with?"
-          : `Great — I'm ready to move on to **${nextStage?.name ?? 'the next stage'}**. What should we tackle first?`
-        void sendMessage(msg)
-      }
-    } catch { /* best-effort */ }
+    const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/advance-stage`, { method: 'POST' }).catch(() => null)
+    if (res?.ok) {
+      const updated = (await res.json()) as OnboardingCase
+      setOnboardingCase(updated)
+      const nextStage = updated.workflow.find((s) => s.stage_id === updated.current_stage)
+      const msg = updated.status === 'completed'
+        ? "I've completed all onboarding stages! What else can I help with?"
+        : `Moving on to **${nextStage?.name ?? 'the next stage'}** — what would you like to tackle first?`
+      void sendMessage(msg)
+    }
   }, [onboardingCase]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Stage click in sidebar ────────────────────────────────────────────── //
+  // ── Stage click ───────────────────────────────────────────────────────── //
   const handleStageClick = useCallback((_stageId: string, stageName: string) => {
     setPrefill(`Tell me about the ${stageName} stage and what I need to do.`)
   }, [])
 
-  // ── Escalation ───────────────────────────────────────────────────────── //
+  // ── Escalation ────────────────────────────────────────────────────────── //
   const handleEscalated = useCallback((message: string) => {
     setShowEscalation(false)
     if (onboardingCase) void refreshCase(onboardingCase.case_id)
-    setMessages((prev) => [...prev, {
-      id: generateId(),
-      role: 'assistant',
-      content: message,
-      timestamp: new Date().toISOString(),
-    }])
+    setMessages((prev) => [...prev, { id: generateId(), role: 'assistant', content: message, timestamp: new Date().toISOString() }])
   }, [onboardingCase, refreshCase])
 
   // ── Send ──────────────────────────────────────────────────────────────── //
@@ -192,28 +183,26 @@ const App: React.FC = () => {
     const trimmed = content.trim()
     if (!trimmed || isLoading) return
 
-    setMessages((prev) => [...prev, {
-      id: generateId(), role: 'user', content: trimmed,
-      timestamp: new Date().toISOString(),
-    }])
+    setMessages((prev) => [...prev, { id: generateId(), role: 'user', content: trimmed, timestamp: new Date().toISOString() }])
     setIsLoading(true)
     setError(null)
     setLastFailedMessage(null)
 
     const body: ChatRequest = {
-      message: trimmed,
+      message:        trimmed,
       conversationId: conversationId.current,
-      caseId: onboardingCase?.case_id,
-    }
+      caseId:         onboardingCase?.case_id,
+      userId:         userId || undefined,
+    } as ChatRequest & { userId?: string }
 
     const assistantId = generateId()
 
     try {
       const res = await fetch(`${API_BASE}/api/chat`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(125_000),
+        body:    JSON.stringify(body),
+        signal:  AbortSignal.timeout(125_000),
       })
       if (!res.ok) {
         let detail = `Server error ${res.status}`
@@ -221,15 +210,12 @@ const App: React.FC = () => {
         throw new Error(detail)
       }
 
-      const reader = res.body?.getReader()
+      const reader  = res.body?.getReader()
       const decoder = new TextDecoder()
       if (!reader) throw new Error('No response body')
 
       setIsLoading(false)
-      setMessages((prev) => [...prev, {
-        id: assistantId, role: 'assistant', content: '', sources: [],
-        confidence: 0, timestamp: new Date().toISOString(), feedback: null,
-      }])
+      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '', sources: [], confidence: 0, timestamp: new Date().toISOString(), feedback: null }])
 
       let buffer = ''
       while (true) {
@@ -243,17 +229,13 @@ const App: React.FC = () => {
           try {
             const evt = JSON.parse(line.slice(6)) as { type: string; text?: string; sources?: string[]; confidence?: number; timestamp?: string; message?: string }
             if (evt.type === 'token' && evt.text) {
-              setMessages((prev) => prev.map((m) =>
-                m.id === assistantId ? { ...m, content: m.content + evt.text } : m
-              ))
+              setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: m.content + evt.text } : m))
             } else if (evt.type === 'done') {
-              setMessages((prev) => prev.map((m) =>
-                m.id === assistantId ? { ...m, sources: evt.sources ?? [], confidence: evt.confidence ?? 0, timestamp: evt.timestamp ?? m.timestamp } : m
-              ))
+              setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, sources: evt.sources ?? [], confidence: evt.confidence ?? 0, timestamp: evt.timestamp ?? m.timestamp } : m))
             } else if (evt.type === 'error') {
               throw new Error(evt.message ?? 'Stream error')
             }
-          } catch { /* malformed line */ }
+          } catch { /* malformed */ }
         }
       }
       return
@@ -261,20 +243,15 @@ const App: React.FC = () => {
       const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
       const msg = isTimeout
         ? 'Request timed out. Ollama may still be loading the model — please try again.'
-        : err instanceof Error ? err.message : 'Unexpected error. Please try again.'
+        : err instanceof Error ? err.message : 'Unexpected error.'
       setError(msg)
       setLastFailedMessage(trimmed)
-      setMessages((prev) => [...prev, {
-        id: generateId(), role: 'assistant',
-        content: `Unable to get a response: ${msg}\n\nFor immediate help, contact HR at hr@acme.com or use the **Get Human Help** button.`,
-        timestamp: new Date().toISOString(), isError: true,
-      }])
+      setMessages((prev) => [...prev, { id: generateId(), role: 'assistant', content: `Unable to get a response: ${msg}\n\nUse the **Get Human Help** button for immediate assistance.`, timestamp: new Date().toISOString(), isError: true }])
     } finally {
       setIsLoading(false)
     }
-  }, [isLoading, onboardingCase])
+  }, [isLoading, onboardingCase, userId])
 
-  // ── Retry ─────────────────────────────────────────────────────────────── //
   const handleRetry = useCallback(() => {
     if (!lastFailedMessage) return
     setMessages((prev) => {
@@ -289,43 +266,25 @@ const App: React.FC = () => {
     void sendMessage(msg)
   }, [lastFailedMessage, sendMessage])
 
-
-  // ── Upload ────────────────────────────────────────────────────────────── //
   const handleFileUpload = useCallback(async (file: File) => {
     setIsUploading(true)
     const formData = new FormData()
     formData.append('file', file)
     try {
-      const res = await fetch(`${API_BASE}/api/upload`, {
-        method: 'POST',
-        body: formData,
-        signal: AbortSignal.timeout(30_000),
-      })
-      if (!res.ok) {
-        let detail = `Upload failed (${res.status})`
-        try { const j = (await res.json()) as { detail?: string }; if (j.detail) detail = j.detail } catch { /* ok */ }
-        setError(detail)
-        return
-      }
+      const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', body: formData, signal: AbortSignal.timeout(30_000) })
+      if (!res.ok) { const j = (await res.json()) as { detail?: string }; setError(j.detail ?? 'Upload failed'); return }
       const data = (await res.json()) as { filename: string; sections_added: number }
       setUploadedFiles((prev) => {
         const exists = prev.find((f) => f.name === data.filename)
         if (exists) return prev.map((f) => f.name === data.filename ? { ...f, sections: f.sections + data.sections_added } : f)
         return [...prev, { name: data.filename, sections: data.sections_added }]
       })
-    } catch (err) {
-      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
-      setError(isTimeout ? 'Upload timed out.' : 'Upload failed. Is the backend running?')
-    } finally {
-      setIsUploading(false)
-    }
+    } catch { setError('Upload failed. Is the backend running?') }
+    finally { setIsUploading(false) }
   }, [])
 
-  // ── Clear chat ────────────────────────────────────────────────────────── //
   const clearChat = useCallback(() => {
-    setMessages([])
-    setError(null)
-    setLastFailedMessage(null)
+    setMessages([]); setError(null); setLastFailedMessage(null)
     const newId = generateId()
     conversationId.current = newId
     localStorage.setItem(CONVERSATION_ID_KEY, newId)
@@ -340,7 +299,7 @@ const App: React.FC = () => {
             <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <p className="text-sm text-slate-500">Loading your onboarding…</p>
+          <p className="text-sm text-slate-500">Loading your workspace…</p>
         </div>
       </div>
     )
@@ -350,22 +309,13 @@ const App: React.FC = () => {
     <ErrorBoundary>
       <div className="flex h-screen bg-surface-base overflow-hidden font-sans">
 
-        {/* ── Identity modal ── */}
-        {showIdentityModal && (
-          <UserIdentityModal apiBase={API_BASE} onCaseCreated={handleCaseCreated} />
-        )}
-
-        {/* ── Escalation modal ── */}
         {showEscalation && onboardingCase && (
-          <EscalationModal
-            caseId={onboardingCase.case_id}
-            apiBase={API_BASE}
-            onClose={() => setShowEscalation(false)}
-            onEscalated={handleEscalated}
-          />
+          <EscalationModal caseId={onboardingCase.case_id} apiBase={API_BASE} onClose={() => setShowEscalation(false)} onEscalated={handleEscalated} />
         )}
 
-        {/* ── Left Sidebar ── */}
+        {showAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} />}
+
+        {/* Sidebar */}
         <div className="hidden lg:flex">
           <Sidebar
             onNewChat={clearChat}
@@ -374,16 +324,24 @@ const App: React.FC = () => {
             onCompleteItem={handleCompleteItem}
             onEscalate={() => setShowEscalation(true)}
             onAdvanceStage={handleAdvanceStage}
+            onOpenAdmin={() => setShowAdmin(true)}
             uploadedFiles={uploadedFiles}
             onUpload={(f) => void handleFileUpload(f)}
             isUploading={isUploading}
+            username={username}
+            userSessions={userSessions}
+            activeSessionId={conversationId.current}
+            onSelectSession={(sid) => {
+              conversationId.current = sid
+              localStorage.setItem(CONVERSATION_ID_KEY, sid)
+              setMessages([])
+              localStorage.removeItem(STORAGE_KEY)
+            }}
           />
         </div>
 
-        {/* ── Main chat panel ── */}
+        {/* Main panel */}
         <div className="flex-1 flex flex-col min-w-0">
-
-          {/* Mobile header */}
           <header className="lg:hidden flex items-center justify-between px-4 py-3 border-b border-white/[0.06] bg-surface-panel">
             <div className="flex items-center gap-2.5">
               <div className="w-6 h-6 rounded-md bg-indigo-600 flex items-center justify-center">
@@ -391,48 +349,23 @@ const App: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
               </div>
-              <div>
-                <span className="text-sm font-semibold text-slate-200">HR Onboarding</span>
-                {onboardingCase && (
-                  <span className="ml-2 text-[10px] text-slate-600 font-mono">{onboardingCase.case_id}</span>
-                )}
-              </div>
+              <span className="text-sm font-semibold text-slate-200">HR Onboarding</span>
             </div>
             <div className="flex items-center gap-2">
-              {onboardingCase && (
-                <button
-                  onClick={() => setShowEscalation(true)}
-                  className="text-xs text-amber-500 hover:text-amber-300 transition-colors"
-                >
-                  Get Help
-                </button>
-              )}
-              {messages.length > 0 && (
-                <button onClick={clearChat} className="text-xs text-slate-600 hover:text-slate-400 transition-colors">
-                  Clear
-                </button>
-              )}
+              {onboardingCase && <button onClick={() => setShowEscalation(true)} className="text-xs text-amber-500">Get Help</button>}
+              {messages.length > 0 && <button onClick={clearChat} className="text-xs text-slate-600 hover:text-slate-400">Clear</button>}
             </div>
           </header>
 
-          {/* Stage banner (shows current stage name on mobile) */}
-          {onboardingCase && (
-            <div className="lg:hidden flex items-center gap-2 px-4 py-2 bg-indigo-500/[0.07] border-b border-indigo-500/[0.12]">
-              {(() => {
-                const stage = onboardingCase.workflow.find((s) => s.stage_id === onboardingCase.current_stage)
-                return stage ? (
-                  <>
-                    <span className="text-base">{stage.icon}</span>
-                    <span className="text-xs text-indigo-300 font-medium">{stage.name}</span>
-                    <span className="text-[10px] text-slate-600 ml-auto">{stage.completed_items}/{stage.total_items}</span>
-                  </>
-                ) : null
-              })()}
+          {/* Username badge */}
+          {username && (
+            <div className="lg:hidden flex items-center gap-2 px-4 py-1.5 bg-surface-panel border-b border-white/[0.04]">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="text-[10px] text-slate-600 font-mono">{username}</span>
             </div>
           )}
 
-          {/* Messages */}
-          <main className="flex-1 overflow-y-auto scrollbar-dark" role="main" aria-label="Chat conversation" aria-live="polite" aria-atomic="false" aria-relevant="additions">
+          <main className="flex-1 overflow-y-auto scrollbar-dark" role="main" aria-live="polite" aria-atomic="false" aria-relevant="additions">
             <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
               {messages.map((msg) => (
                 <ChatMessage key={msg.id} message={msg} onRetry={msg.isError ? handleRetry : undefined} />
@@ -442,43 +375,28 @@ const App: React.FC = () => {
             </div>
           </main>
 
-          {/* Error banner */}
           {error && !isLoading && (
-            <div className="border-t border-rose-500/[0.15] bg-rose-950/30 px-6 py-2.5" role="alert" aria-live="assertive">
+            <div className="border-t border-rose-500/[0.15] bg-rose-950/30 px-6 py-2.5" role="alert">
               <div className="max-w-3xl mx-auto flex items-center gap-2.5">
-                <svg className="w-3.5 h-3.5 text-rose-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
                 <p className="text-xs text-rose-300 flex-1 truncate">{error}</p>
                 {lastFailedMessage && (
-                  <button onClick={handleRetry} className="flex-shrink-0 px-2.5 py-1 text-xs font-medium text-rose-300 bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/25 rounded-md transition-all">
-                    Retry
-                  </button>
+                  <button onClick={handleRetry} className="flex-shrink-0 px-2.5 py-1 text-xs font-medium text-rose-300 bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/25 rounded-md transition-all">Retry</button>
                 )}
-                <button onClick={() => setError(null)} className="flex-shrink-0 text-rose-600 hover:text-rose-400 transition-colors" aria-label="Dismiss error">
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                <button onClick={() => setError(null)} className="flex-shrink-0 text-rose-600 hover:text-rose-400" aria-label="Dismiss">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
             </div>
           )}
 
-          {/* Input composer */}
           <footer className="border-t border-white/[0.06] bg-surface-base/80 backdrop-blur-xs px-6 py-4">
             <div className="max-w-3xl mx-auto">
-              <ChatInput
-                onSend={sendMessage}
-                isLoading={isLoading}
-                prefill={prefill}
-                onPrefillConsumed={() => setPrefill('')}
-              />
+              <ChatInput onSend={sendMessage} isLoading={isLoading} prefill={prefill} onPrefillConsumed={() => setPrefill('')} />
               <p className="text-[10px] text-slate-700 text-center mt-2.5">
-                AI responses are grounded in your onboarding context and Acme HR policy. Verify important decisions with HR directly.
+                Responses are grounded in HR policy and your onboarding context. Verify important decisions with HR directly.
               </p>
             </div>
           </footer>
-
         </div>
       </div>
     </ErrorBoundary>

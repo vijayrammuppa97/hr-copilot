@@ -1,37 +1,32 @@
 """
-HR Onboarding Copilot — FastAPI backend
+HR Onboarding Copilot — FastAPI backend v4.0
 
-Endpoints:
-  GET  /health                                  — liveness check
-  POST /api/chat                                — primary chat (case-aware, streaming)
-  POST /api/feedback                            — thumbs-up/down signal
-  POST /api/upload                              — document upload to KB
-  POST /api/cases                               — create onboarding case
-  GET  /api/cases/{case_id}                     — get case + workflow progress
-  POST /api/cases/{case_id}/complete-item       — mark a checklist item done
-  POST /api/cases/{case_id}/advance-stage       — move case to next stage
-  POST /api/cases/{case_id}/escalate            — raise escalation to HR
-  GET  /api/admin/cases                         — list all cases (HR admin)
-  GET  /api/audit/conversations                 — conversation audit
-  GET  /api/audit/conversations/{id}            — single conversation
-  GET  /api/audit/feedback                      — feedback summary
+New in this version:
+  - Semantic search (Ollama embeddings + cosine similarity)
+  - Fuzzy/typo-tolerant retrieval (difflib expansion)
+  - Recursive chunking with overlap
+  - Multi-doc admin folder (data/knowledge_docs/) + file watcher
+  - User identity: random username + UUID user_id
+  - Session history tree per user
+  - Evaluation logging: Recall@3 + faithfulness per query
+  - Admin observability: stats, top-20 interactions, charts
+  - Admin auth via bearer token (ADMIN_TOKEN env var)
 """
 
 import asyncio
-import os
-import time
+import json
 import logging
-from datetime import datetime, timezone
-from contextlib import asynccontextmanager
+import os
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-import json
-
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -41,12 +36,21 @@ from dotenv import load_dotenv
 from knowledge_loader import KnowledgeBase
 from llm_handler import LLMHandler
 from document_loader import parse_document, SUPPORTED_EXTENSIONS
-from database import init_db, save_exchange, save_feedback, get_conversations, get_conversation_messages, get_feedback_summary
+from document_watcher import DocumentWatcher
+from database import (
+    init_db, save_exchange, save_feedback,
+    get_conversations, get_conversation_messages, get_feedback_summary,
+    get_admin_stats, get_top_interactions, get_confidence_distribution, get_messages_over_time,
+)
 from case_manager import (
     create_case, get_case, get_all_cases,
-    complete_item, advance_stage, create_escalation,
-    build_case_context,
+    complete_item, advance_stage, create_escalation, build_case_context,
 )
+from user_manager import (
+    register_user, get_user, touch_user, get_user_sessions,
+    get_all_users, create_session, update_session, generate_username, generate_user_id,
+)
+from evaluation import log_evaluation, get_evaluation_summary
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
 
@@ -61,72 +65,85 @@ logger = logging.getLogger("hr_copilot")
 
 load_dotenv()
 
-KB_PATH = os.getenv("KB_PATH", "../data/knowledge_base.md")
+KB_PATH      = os.getenv("KB_PATH", "../data/knowledge_base.md")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+ADMIN_TOKEN  = os.getenv("ADMIN_TOKEN", "hr-admin-secret-2024")
 CORS_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
     if o.strip()
 ]
 
-LLM_TIMEOUT_SECONDS = 120.0
-
 _conversation_store: dict[str, list[dict[str, str]]] = {}
-MAX_HISTORY_ENTRIES = 12  # 6 full exchanges
+MAX_HISTORY_ENTRIES = 12
 
-# ── App setup ────────────────────────────────────────────────────────────── #
+# ── Admin auth ────────────────────────────────────────────────────────────── #
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def require_admin(credentials: HTTPAuthorizationCredentials | None = Security(_bearer)) -> None:
+    if not credentials or credentials.credentials != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing admin token")
+
+
+# ── App setup ─────────────────────────────────────────────────────────────── #
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
+
+knowledge_base: KnowledgeBase
+llm_handler:    LLMHandler
+doc_watcher:    DocumentWatcher
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    logger.info(
-        "Starting HR Onboarding Copilot — model=%s host=%s kb=%s",
-        OLLAMA_MODEL, OLLAMA_HOST, KB_PATH,
-    )
+    global knowledge_base, llm_handler, doc_watcher
+    logger.info("Starting HR Onboarding Copilot v4 — model=%s", OLLAMA_MODEL)
     init_db()
+    knowledge_base = KnowledgeBase(KB_PATH, embed_host=OLLAMA_HOST)
+    llm_handler    = LLMHandler(model=OLLAMA_MODEL, host=OLLAMA_HOST)
+    doc_watcher    = DocumentWatcher(knowledge_base)
+    doc_watcher.start()
     yield
-    logger.info("Shutting down HR Onboarding Copilot")
+    doc_watcher.stop()
+    logger.info("Shutting down")
 
 
 app = FastAPI(
     title="HR Onboarding Copilot API",
-    version="3.0.0",
-    description="AI-powered HR Onboarding with workflow orchestration, session memory, case IDs, and human escalation",
+    version="4.0.0",
+    description="Enterprise HR Onboarding — semantic RAG, workflow orchestration, user management, observability",
     lifespan=lifespan,
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
-
-knowledge_base = KnowledgeBase(kb_path=KB_PATH)
-llm_handler = LLMHandler(model=OLLAMA_MODEL, host=OLLAMA_HOST)
 
 # ── Schemas ──────────────────────────────────────────────────────────────── #
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=2000)
-    conversationId: str = Field(..., min_length=1, max_length=100)
-    caseId: str | None = Field(default=None, max_length=100)
+    message:        str       = Field(..., min_length=1, max_length=2000)
+    conversationId: str       = Field(..., min_length=1, max_length=100)
+    caseId:         str | None = Field(default=None, max_length=100)
+    userId:         str | None = Field(default=None, max_length=100)
 
     @field_validator("message")
     @classmethod
     def strip_message(cls, v: str) -> str:
-        stripped = v.strip()
-        if not stripped:
+        v = v.strip()
+        if not v:
             raise ValueError("message must not be blank")
-        return stripped
+        return v
 
     @field_validator("conversationId")
     @classmethod
@@ -135,29 +152,24 @@ class ChatRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    messageId: str = Field(..., min_length=1, max_length=100)
+    messageId:      str = Field(..., min_length=1, max_length=100)
     conversationId: str = Field(..., min_length=1, max_length=100)
-    feedback: Literal["helpful", "not_helpful"]
+    feedback:       Literal["helpful", "not_helpful"]
 
 
-class FeedbackResponse(BaseModel):
-    status: str
-
-
-class UploadResponse(BaseModel):
-    filename: str
-    sections_added: int
-    total_kb_sections: int
+class RegisterUserRequest(BaseModel):
+    user_id:  str | None = None
+    username: str | None = None
 
 
 class CreateCaseRequest(BaseModel):
-    employee_name: str = Field(..., min_length=1, max_length=200)
+    employee_name:  str = Field(..., min_length=1, max_length=200)
     employee_email: str = Field(..., min_length=3, max_length=200)
-    employee_id: str = Field(default="", max_length=100)
-    department: str = Field(default="", max_length=200)
-    role: str = Field(default="", max_length=200)
-    manager_name: str = Field(default="", max_length=200)
-    start_date: str = Field(default="", max_length=50)
+    employee_id:    str = Field(default="", max_length=100)
+    department:     str = Field(default="", max_length=200)
+    role:           str = Field(default="", max_length=200)
+    manager_name:   str = Field(default="", max_length=200)
+    start_date:     str = Field(default="", max_length=50)
 
     @field_validator("employee_name", "employee_email")
     @classmethod
@@ -167,18 +179,18 @@ class CreateCaseRequest(BaseModel):
 
 class CompleteItemRequest(BaseModel):
     stage_id: str = Field(..., min_length=1, max_length=100)
-    item_id: str = Field(..., min_length=1, max_length=100)
+    item_id:  str = Field(..., min_length=1, max_length=100)
 
 
 class EscalateRequest(BaseModel):
-    reason: str = Field(..., min_length=1, max_length=1000)
+    reason:       str = Field(..., min_length=1, max_length=1000)
     escalated_by: str = Field(default="employee", max_length=50)
 
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
 
 # ── Exception handler ─────────────────────────────────────────────────────── #
-
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
@@ -188,37 +200,71 @@ async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
 
 # ── Health ────────────────────────────────────────────────────────────────── #
 
-
 @app.get("/health", tags=["ops"])
 async def health_check() -> dict:
     return {
-        "status": "healthy",
-        "kb_sections": knowledge_base.section_count,
-        "model": OLLAMA_MODEL,
-        "ollama_host": OLLAMA_HOST,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status":           "healthy",
+        "kb_sections":      knowledge_base.section_count,
+        "kb_sources":       knowledge_base.source_files,
+        "semantic_enabled": knowledge_base.semantic_enabled,
+        "model":            OLLAMA_MODEL,
+        "timestamp":        datetime.now(timezone.utc).isoformat(),
     }
 
 
-# ── Chat ──────────────────────────────────────────────────────────────────── #
+# ── User management ───────────────────────────────────────────────────────── #
 
+@app.post("/api/users/register", tags=["users"])
+async def register(body: RegisterUserRequest) -> dict:
+    uid      = body.user_id  or generate_user_id()
+    username = body.username or generate_username()
+    existing = get_user(uid)
+    if existing:
+        touch_user(uid)
+        return existing
+    return register_user(uid, username)
+
+
+@app.get("/api/users/{user_id}", tags=["users"])
+async def get_user_profile(user_id: str) -> dict:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    touch_user(user_id)
+    return user
+
+
+@app.get("/api/users/{user_id}/sessions", tags=["users"])
+async def user_sessions(user_id: str) -> list[dict]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return get_user_sessions(user_id)
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────── #
 
 @app.post("/api/chat", tags=["chat"])
 @limiter.limit("20/minute")
 async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     cid = body.conversationId
-    logger.info("chat cid=%r case=%r message=%r", cid, body.caseId, body.message[:80])
+    logger.info("chat cid=%r user=%r case=%r msg=%r", cid, body.userId, body.caseId, body.message[:80])
 
-    # Load case context if caseId provided
+    # Track session
+    if body.userId:
+        create_session(body.userId, cid, body.caseId)
+        update_session(cid)
+
+    # Build case context
     case_context_str: str | None = None
     if body.caseId:
         case = get_case(body.caseId)
         if case:
             case_context_str = build_case_context(case)
 
-    history = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
+    history    = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
     kb_results = knowledge_base.search(body.message)
-    sources = [r["section"] for r in kb_results[:3]]
+    sources    = [r["section"] for r in kb_results[:3]]
     confidence = llm_handler.estimate_confidence(kb_results)
 
     async def event_stream() -> AsyncGenerator[str, None]:
@@ -235,7 +281,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
 
             store = _conversation_store.setdefault(cid, [])
             store.extend([
-                {"role": "user", "content": body.message},
+                {"role": "user",      "content": body.message},
                 {"role": "assistant", "content": full_text},
             ])
             if len(store) > MAX_HISTORY_ENTRIES:
@@ -243,8 +289,10 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
 
             save_exchange(cid, body.message, full_text, sources, confidence)
 
-            yield f"data: {json.dumps({'type': 'done', 'sources': sources, 'confidence': round(confidence, 2), 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
-            logger.info("chat done cid=%r tokens=%d", cid, len(full_text))
+            # Log evaluation metrics
+            eval_metrics = log_evaluation(cid, body.message, kb_results, full_text, k=3)
+
+            yield f"data: {json.dumps({'type': 'done', 'sources': sources, 'confidence': round(confidence, 2), 'eval': eval_metrics, 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
 
         except Exception as exc:
             logger.error("LLM stream error cid=%r: %s", cid, exc, exc_info=True)
@@ -257,13 +305,42 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     )
 
 
-# ── Onboarding Cases ──────────────────────────────────────────────────────── #
+# ── Feedback ──────────────────────────────────────────────────────────────── #
 
+@app.post("/api/feedback", tags=["chat"])
+@limiter.limit("30/minute")
+async def feedback(request: Request, body: FeedbackRequest) -> dict:
+    save_feedback(body.messageId, body.conversationId, body.feedback)
+    return {"status": "recorded"}
+
+
+# ── Document upload ───────────────────────────────────────────────────────── #
+
+@app.post("/api/upload", tags=["documents"])
+@limiter.limit("5/minute")
+async def upload_document(request: Request, file: UploadFile = File(...)) -> dict:
+    filename = file.filename or "upload"
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type '{ext}'")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit")
+    if not data:
+        raise HTTPException(status_code=400, detail="File is empty")
+    sections = parse_document(data, filename)
+    if not sections:
+        raise HTTPException(status_code=422, detail="Could not extract content from file")
+    added = knowledge_base.add_sections(sections, source_file=filename)
+    return {"filename": filename, "sections_added": added, "total_kb_sections": knowledge_base.section_count}
+
+
+# ── Onboarding cases ──────────────────────────────────────────────────────── #
 
 @app.post("/api/cases", tags=["onboarding"])
 @limiter.limit("10/minute")
 async def create_onboarding_case(request: Request, body: CreateCaseRequest) -> dict:
-    case = create_case(
+    return create_case(
         employee_name=body.employee_name,
         employee_email=body.employee_email,
         employee_id=body.employee_id,
@@ -272,7 +349,6 @@ async def create_onboarding_case(request: Request, body: CreateCaseRequest) -> d
         manager_name=body.manager_name,
         start_date=body.start_date,
     )
-    return case
 
 
 @app.get("/api/cases/{case_id}", tags=["onboarding"])
@@ -285,80 +361,73 @@ async def get_onboarding_case(case_id: str) -> dict:
 
 @app.post("/api/cases/{case_id}/complete-item", tags=["onboarding"])
 async def mark_item_complete(case_id: str, body: CompleteItemRequest) -> dict:
-    case = get_case(case_id)
-    if not case:
+    if not get_case(case_id):
         raise HTTPException(status_code=404, detail="Case not found")
-    updated = complete_item(case_id, body.stage_id, body.item_id)
-    return updated  # type: ignore[return-value]
+    return complete_item(case_id, body.stage_id, body.item_id)  # type: ignore[return-value]
 
 
 @app.post("/api/cases/{case_id}/advance-stage", tags=["onboarding"])
 async def advance_onboarding_stage(case_id: str) -> dict:
-    case = get_case(case_id)
-    if not case:
+    if not get_case(case_id):
         raise HTTPException(status_code=404, detail="Case not found")
-    updated = advance_stage(case_id)
-    return updated  # type: ignore[return-value]
+    return advance_stage(case_id)  # type: ignore[return-value]
 
 
 @app.post("/api/cases/{case_id}/escalate", tags=["onboarding"])
 @limiter.limit("5/minute")
 async def escalate_case(request: Request, case_id: str, body: EscalateRequest) -> dict:
-    case = get_case(case_id)
-    if not case:
+    if not get_case(case_id):
         raise HTTPException(status_code=404, detail="Case not found")
     return create_escalation(case_id, body.reason, body.escalated_by)
 
 
-# ── Admin ─────────────────────────────────────────────────────────────────── #
+# ── Admin — protected endpoints ───────────────────────────────────────────── #
+
+@app.get("/api/admin/stats", tags=["admin"])
+async def admin_stats(_: None = Depends(require_admin)) -> dict:
+    return get_admin_stats()
+
+
+@app.get("/api/admin/top-interactions", tags=["admin"])
+async def admin_top_interactions(limit: int = 20, _: None = Depends(require_admin)) -> list[dict]:
+    return get_top_interactions(limit=limit)
+
+
+@app.get("/api/admin/confidence-distribution", tags=["admin"])
+async def admin_confidence_dist(_: None = Depends(require_admin)) -> list[dict]:
+    return get_confidence_distribution()
+
+
+@app.get("/api/admin/messages-over-time", tags=["admin"])
+async def admin_messages_over_time(days: int = 30, _: None = Depends(require_admin)) -> list[dict]:
+    return get_messages_over_time(days=days)
+
+
+@app.get("/api/admin/evaluation", tags=["admin"])
+async def admin_evaluation(_: None = Depends(require_admin)) -> dict:
+    return get_evaluation_summary()
+
+
+@app.get("/api/admin/users", tags=["admin"])
+async def admin_users(limit: int = 500, _: None = Depends(require_admin)) -> list[dict]:
+    return get_all_users(limit=limit)
 
 
 @app.get("/api/admin/cases", tags=["admin"])
-async def list_cases(limit: int = 200) -> list[dict]:
+async def admin_cases(limit: int = 200, _: None = Depends(require_admin)) -> list[dict]:
     return get_all_cases(limit=limit)
 
 
-# ── Document upload ───────────────────────────────────────────────────────── #
-
-
-@app.post("/api/upload", response_model=UploadResponse, tags=["documents"])
-@limiter.limit("5/minute")
-async def upload_document(request: Request, file: UploadFile = File(...)) -> UploadResponse:
-    filename = file.filename or "upload"
-    ext = Path(filename).suffix.lower()
-
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
-        )
-
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit")
-    if not data:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    sections = parse_document(data, filename)
-    if not sections:
-        raise HTTPException(status_code=422, detail="Could not extract any content from the file")
-
-    added = knowledge_base.add_sections(sections)
-    return UploadResponse(filename=filename, sections_added=added, total_kb_sections=knowledge_base.section_count)
-
-
-# ── Feedback ──────────────────────────────────────────────────────────────── #
-
-
-@app.post("/api/feedback", response_model=FeedbackResponse, tags=["chat"])
-@limiter.limit("30/minute")
-async def feedback(request: Request, body: FeedbackRequest) -> FeedbackResponse:
-    save_feedback(body.messageId, body.conversationId, body.feedback)
-    return FeedbackResponse(status="recorded")
+@app.get("/api/admin/kb-sources", tags=["admin"])
+async def admin_kb_sources(_: None = Depends(require_admin)) -> dict:
+    return {
+        "sources":          knowledge_base.source_files,
+        "total_sections":   knowledge_base.section_count,
+        "semantic_enabled": knowledge_base.semantic_enabled,
+    }
 
 
 # ── Audit ─────────────────────────────────────────────────────────────────── #
-
 
 @app.get("/api/audit/conversations", tags=["audit"])
 async def audit_conversations(limit: int = 100) -> list[dict]:

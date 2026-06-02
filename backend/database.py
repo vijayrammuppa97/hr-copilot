@@ -108,11 +108,45 @@ def init_db() -> None:
                 FOREIGN KEY (case_id) REFERENCES onboarding_cases(case_id)
             );
 
+            -- Named users with random usernames
+            CREATE TABLE IF NOT EXISTS users (
+                user_id    TEXT PRIMARY KEY,
+                username   TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_seen  TEXT NOT NULL
+            );
+
+            -- One session per conversation, linked to a user
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id      TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                case_id         TEXT,
+                message_count   INTEGER DEFAULT 0,
+                started_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            -- Per-query evaluation metrics
+            CREATE TABLE IF NOT EXISTS evaluation_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                query           TEXT NOT NULL,
+                recall_at_k     REAL,
+                faithfulness    REAL,
+                relevance_score REAL,
+                k               INTEGER DEFAULT 3,
+                timestamp       TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_cid   ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_feedback_cid   ON feedback(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_steps_case     ON case_workflow_steps(case_id);
             CREATE INDEX IF NOT EXISTS idx_docs_case      ON case_documents(case_id);
             CREATE INDEX IF NOT EXISTS idx_escl_case      ON escalations(case_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user  ON user_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_eval_cid       ON evaluation_log(conversation_id);
         """)
     logger.info("SQLite database ready at %s", DB_PATH)
 
@@ -193,10 +227,81 @@ def get_conversation_messages(conversation_id: str) -> list[dict]:
 def get_feedback_summary() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
+            "SELECT value, COUNT(*) AS count FROM feedback GROUP BY value",
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Observability queries ─────────────────────────────────────────────────── #
+
+def get_admin_stats() -> dict:
+    with _connect() as conn:
+        total_msgs   = conn.execute("SELECT COUNT(*) FROM messages WHERE role='user'").fetchone()[0]
+        total_users  = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_cases  = conn.execute("SELECT COUNT(*) FROM onboarding_cases").fetchone()[0]
+        avg_conf     = conn.execute("SELECT AVG(confidence) FROM messages WHERE role='assistant' AND confidence IS NOT NULL").fetchone()[0]
+        today        = datetime.now(timezone.utc).date().isoformat()
+        msgs_today   = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE role='user' AND timestamp >= ?", (today,)
+        ).fetchone()[0]
+        escalations  = conn.execute("SELECT COUNT(*) FROM escalations WHERE status='open'").fetchone()[0]
+    return {
+        "total_messages":      total_msgs,
+        "total_users":         total_users,
+        "total_cases":         total_cases,
+        "avg_confidence":      round(avg_conf or 0, 3),
+        "messages_today":      msgs_today,
+        "open_escalations":    escalations,
+    }
+
+
+def get_top_interactions(limit: int = 20) -> list[dict]:
+    """Most frequent user queries grouped by normalised content."""
+    with _connect() as conn:
+        rows = conn.execute(
             """
-            SELECT value, COUNT(*) AS count
-            FROM feedback
-            GROUP BY value
+            SELECT content AS query,
+                   COUNT(*) AS frequency,
+                   MAX(timestamp) AS last_seen
+            FROM messages
+            WHERE role = 'user'
+            GROUP BY LOWER(TRIM(content))
+            ORDER BY frequency DESC
+            LIMIT ?
             """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_confidence_distribution() -> list[dict]:
+    """Bucket confidence scores into 10% bands for histogram."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT CAST(ROUND(confidence * 10) AS INTEGER) * 10 AS bucket,
+                   COUNT(*) AS count
+            FROM messages
+            WHERE role = 'assistant' AND confidence IS NOT NULL
+            GROUP BY bucket
+            ORDER BY bucket
+            """,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_messages_over_time(days: int = 30) -> list[dict]:
+    """Daily message count for the last N days."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DATE(timestamp) AS date, COUNT(*) AS count
+            FROM messages
+            WHERE role = 'user'
+              AND timestamp >= DATE('now', ?)
+            GROUP BY DATE(timestamp)
+            ORDER BY date
+            """,
+            (f"-{days} days",),
         ).fetchall()
     return [dict(r) for r in rows]
