@@ -66,7 +66,7 @@ logger = logging.getLogger("hr_copilot")
 load_dotenv()
 
 KB_PATH      = os.getenv("KB_PATH", "../data/knowledge_base.md")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 ADMIN_TOKEN  = os.getenv("ADMIN_TOKEN", "hr-admin-secret-2024")
 CORS_ORIGINS = [
@@ -208,7 +208,34 @@ async def health_check() -> dict:
         "kb_sources":       knowledge_base.source_files,
         "semantic_enabled": knowledge_base.semantic_enabled,
         "model":            OLLAMA_MODEL,
+        "embed_model":      os.getenv("EMBED_MODEL", "nomic-embed-text"),
         "timestamp":        datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── Retrieval debug — diagnose what chunks are retrieved for a query ───────── #
+
+@app.get("/api/debug/retrieve", tags=["ops"])
+async def debug_retrieve(q: str, top_k: int = 5) -> dict:
+    """
+    Show exactly which chunks are retrieved for a query.
+    Use this to diagnose retrieval failures before blaming the LLM.
+
+    Example: GET /api/debug/retrieve?q=paternity+leave
+    """
+    loop    = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, knowledge_base.search, q)
+    return {
+        "query":   q,
+        "results": [
+            {
+                "rank":    i + 1,
+                "section": r["section"],
+                "score":   r.get("score", 0),
+                "preview": r["content"][:300],
+            }
+            for i, r in enumerate(results[:top_k])
+        ],
     }
 
 
@@ -263,7 +290,9 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
             case_context_str = build_case_context(case)
 
     history    = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
-    kb_results = knowledge_base.search(body.message)
+    # Run embedding search in thread pool to avoid blocking the event loop
+    loop       = asyncio.get_event_loop()
+    kb_results = await loop.run_in_executor(None, knowledge_base.search, body.message)
     sources    = [r["section"] for r in kb_results[:3]]
     confidence = llm_handler.estimate_confidence(kb_results)
 

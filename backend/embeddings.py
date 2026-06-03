@@ -9,15 +9,19 @@ Vector similarity: cosine similarity
 Storage: in-memory list + optional SQLite cache for persistence across restarts
 """
 
+import asyncio
 import json
 import logging
 import math
 import os
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import ollama
+
+_executor = ThreadPoolExecutor(max_workers=2)
 
 logger = logging.getLogger("hr_copilot.embeddings")
 
@@ -110,7 +114,9 @@ class EmbeddingGenerator:
             if cached:
                 return cached
         try:
-            resp   = self._client.embeddings(model=self._model, prompt=text)
+            # keep_alive=-1 keeps the embedding model in Ollama's memory
+            # so llama3.2 can also stay loaded simultaneously
+            resp   = self._client.embeddings(model=self._model, prompt=text, keep_alive=-1)
             vector = resp["embedding"]
             if use_cache:
                 _cache_set(h, self._model, vector)
@@ -118,6 +124,11 @@ class EmbeddingGenerator:
         except Exception as exc:
             logger.error("Embedding failed for text='%s...': %s", text[:40], exc)
             return []
+
+    async def embed_async(self, text: str, use_cache: bool = True) -> list[float]:
+        """Non-blocking wrapper — runs embed() in a thread so the event loop stays free."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_executor, self.embed, text, use_cache)
 
     @property
     def model(self) -> str:

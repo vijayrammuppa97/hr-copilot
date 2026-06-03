@@ -27,9 +27,9 @@ logger = logging.getLogger("hr_copilot.docs")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".csv", ".txt", ".md", ".text"}
 
-CHUNK_SIZE    = 400   # characters
-CHUNK_OVERLAP = 80    # characters
-MIN_CHUNK_LEN = 60    # skip tiny fragments
+CHUNK_SIZE    = 1200  # characters — keeps full policy clauses intact
+CHUNK_OVERLAP = 200   # characters — sufficient overlap to preserve cross-boundary facts
+MIN_CHUNK_LEN = 80    # skip tiny fragments
 
 
 # ── Recursive chunker ─────────────────────────────────────────────────────── #
@@ -77,14 +77,19 @@ def _recursive_chunk(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 def _make_sections(chunks: list[str], stem: str, base_heading: str) -> list[dict]:
-    """Convert text chunks into {section, content} dicts."""
+    """Convert text chunks into {section, content} dicts.
+
+    Each chunk's content is prefixed with the section heading so that
+    retrieval always returns heading + relevant text together.
+    This prevents the model from receiving context without knowing
+    which policy section it comes from.
+    """
     sections = []
     for i, chunk in enumerate(chunks):
-        if len(chunks) == 1:
-            label = f"{stem} — {base_heading}"
-        else:
-            label = f"{stem} — {base_heading} (part {i + 1})"
-        sections.append({"section": label, "content": chunk})
+        label = f"{stem} — {base_heading}" if len(chunks) == 1 else f"{stem} — {base_heading} (part {i + 1})"
+        # Prefix every chunk with its heading so the LLM always has section context
+        content = f"{base_heading}\n{chunk}" if not chunk.startswith(base_heading) else chunk
+        sections.append({"section": label, "content": content})
     return sections
 
 

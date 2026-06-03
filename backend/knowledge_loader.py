@@ -4,10 +4,13 @@ HR Knowledge Base — multi-document, semantic search, fuzzy/typo-tolerant retri
 Search pipeline:
   1. Text normalisation  — lowercase, collapse hyphens, strip punctuation
   2. Fuzzy expansion     — difflib finds near-matches for each query token
-                           e.g. "new jrsey" → "new jersey"
-  3. Semantic search     — cosine similarity on Ollama embeddings (primary)
-  4. Keyword re-rank     — Jaccard boosts exact/fuzzy matches (secondary signal)
-  5. Score blend         — 0.7 × semantic + 0.3 × keyword
+  3. Policy keyword boost — 2.5× multiplier when query matches known HR section names
+                            (Annual Leave, Sick Leave, Paternity Leave, Remote Work, etc.)
+  4. Semantic search     — cosine similarity on Ollama nomic-embed-text embeddings (primary)
+  5. Keyword re-rank     — Jaccard boosts exact/fuzzy matches (secondary signal)
+  6. Score blend         — 0.75 × semantic + 0.25 × keyword
+  7. Similarity threshold — results below 0.25 are dropped to prevent irrelevant retrieval
+  8. Per-query logging   — every retrieved chunk is logged so failures can be diagnosed
 
 Admin folder:
   All files inside data/knowledge_docs/ are indexed on startup.
@@ -30,6 +33,54 @@ _STOP_WORDS: frozenset[str] = frozenset(
     "into through about over after what how when where who which that this and "
     "or but if then not no i my me we our you your it its up out so just".split()
 )
+
+# Similarity threshold — chunks below this score are dropped from results.
+# Prevents completely irrelevant sections polluting the LLM context.
+SIMILARITY_THRESHOLD = 0.25
+
+# Policy section keyword map — when a query mentions these terms,
+# chunks whose headings contain the matched keywords receive a 2.5× boost.
+# This directly fixes the "paternity leave → Jury Duty" class of errors.
+_POLICY_KEYWORDS: dict[str, list[str]] = {
+    "annual leave":        ["annual", "leave", "vacation", "holiday"],
+    "sick leave":          ["sick", "medical", "illness", "doctor", "certificate"],
+    "paternity leave":     ["paternity", "father", "paternal"],
+    "maternity leave":     ["maternity", "mother", "maternal", "pregnancy"],
+    "parental leave":      ["parental", "parent", "baby", "newborn", "adoption"],
+    "remote work":         ["remote", "wfh", "work from home", "hybrid"],
+    "grievance":           ["grievance", "complaint", "formal", "dispute"],
+    "performance":         ["performance", "review", "appraisal", "pip"],
+    "resignation":         ["resign", "notice", "termination", "leaving"],
+    "expense":             ["expense", "reimbursement", "claim", "receipt"],
+    "equipment":           ["equipment", "laptop", "device", "hardware", "stolen", "lost"],
+    "harassment":          ["harassment", "bully", "posh", "misconduct"],
+    "overtime":            ["overtime", "extra hours", "additional hours"],
+    "carry forward":       ["carry", "carryover", "rollover", "unused leave"],
+    "emergency leave":     ["emergency", "bereavement", "compassionate", "funeral"],
+    "jury duty":           ["jury", "civic", "court", "witness"],
+    "training":            ["training", "learning", "development", "course", "lms"],
+    "payroll":             ["payroll", "salary", "pay", "bank", "tax", "deduction"],
+    "onboarding":          ["onboarding", "joining", "induction", "first day"],
+}
+
+
+def _policy_title_boost(query_tokens: set[str], section_title: str) -> float:
+    """
+    Returns a multiplier (1.0 = no boost, 2.5 = strong boost) when query
+    tokens match a known policy section keyword group AND the section title
+    also contains those keywords.
+    """
+    title_lower = section_title.lower()
+    for _group, keywords in _POLICY_KEYWORDS.items():
+        # Check if query mentions any keyword in the group
+        query_matches = any(kw in " ".join(query_tokens) for kw in keywords)
+        if not query_matches:
+            continue
+        # Check if the section title also contains any keyword from the group
+        title_matches = any(kw in title_lower for kw in keywords)
+        if title_matches:
+            return 2.5
+    return 1.0
 
 
 # ── Text helpers ─────────────────────────────────────────────────────────── #
@@ -174,50 +225,75 @@ class KnowledgeBase:
 
     # ── Search ────────────────────────────────────────────────────────────── #
 
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, query: str, top_k: int = 8) -> list[dict]:
+        """
+        Retrieve the top_k most relevant sections for a query.
+
+        Pipeline:
+          1. Normalise + fuzzy-expand query tokens
+          2. Semantic similarity (nomic-embed-text cosine)
+          3. Keyword Jaccard re-rank
+          4. Policy section title keyword boost (2.5×)
+          5. Similarity threshold filter (drops score < SIMILARITY_THRESHOLD)
+          6. Log every retrieved chunk for diagnosis
+        """
         if not self._sections:
             return []
 
-        q_norm   = _normalise(query)
         q_tokens = _tokenize(query)
         if not q_tokens:
-            return [{"section": s.section, "content": s.content, "source_file": s.source_file} for s in self._sections[:top_k]]
+            return [
+                {"section": s.section, "content": s.content, "source_file": s.source_file, "score": 0.0}
+                for s in self._sections[:top_k]
+            ]
 
-        # Fuzzy-expand query tokens against the vocab to fix typos
+        # 1. Fuzzy-expand to fix typos
         expanded_tokens = _fuzzy_expand(q_tokens, self._vocab, cutoff=0.80)
 
-        # ── Semantic score (primary) ──────────────────────────────────────── #
+        # 2. Semantic scores from vector store
         semantic_scores: dict[int, float] = {}
         if self._store and self._semantic_ok:
-            sem_results = self._store.search(query, top_k=min(top_k * 3, 20))
-            # Map section content back to indices
+            # Request 3× top_k candidates so re-ranking has room to work
+            sem_results = self._store.search(query, top_k=min(top_k * 3, 30))
             for res in sem_results:
                 for i, s in enumerate(self._sections):
                     if s.section == res["section"] and s.content == res["content"]:
                         semantic_scores[i] = res.get("score", 0.0)
                         break
 
-        # ── Keyword score (secondary) ─────────────────────────────────────── #
+        # 3+4. Keyword + policy boost scoring
         scored: list[tuple[float, int]] = []
         for i, sec in enumerate(self._sections):
             kw_score = _jaccard(expanded_tokens, sec.tokens)
-            # Heading match bonus
+
+            # 3a. Heading token match bonus
             if expanded_tokens & _tokenize_set(sec.section):
                 kw_score *= 1.4
+
+            # 4. Policy keyword title boost — biggest fix for wrong-section retrieval
+            policy_boost = _policy_title_boost(expanded_tokens, sec.section)
+            kw_score *= policy_boost
 
             sem_score = semantic_scores.get(i, 0.0)
 
             if self._semantic_ok and sem_score > 0:
-                combined = 0.70 * sem_score + 0.30 * kw_score
+                combined = 0.75 * sem_score + 0.25 * kw_score
             else:
-                combined = kw_score  # fallback to pure keyword
+                combined = kw_score  # fallback to keyword-only
+
+            # Apply policy boost to combined score too
+            combined *= policy_boost if policy_boost > 1.0 and sem_score > 0 else 1.0
 
             if combined > 0:
                 scored.append((combined, i))
 
         scored.sort(key=lambda x: x[0], reverse=True)
+
+        # 5. Similarity threshold — drop irrelevant results
         results = []
-        for score, idx in scored[:top_k]:
+        for score, idx in scored[:top_k * 2]:   # over-fetch then filter
+            if score < SIMILARITY_THRESHOLD and len(results) >= 3:
+                break   # always keep at least 3 even if below threshold
             s = self._sections[idx]
             results.append({
                 "section":     s.section,
@@ -225,6 +301,20 @@ class KnowledgeBase:
                 "source_file": s.source_file,
                 "score":       round(score, 4),
             })
+            if len(results) >= top_k:
+                break
+
+        # 6. Log retrieved chunks for every query — critical for diagnosis
+        logger.info(
+            "RETRIEVE query=%r top=%d threshold=%.2f",
+            query[:80], len(results), SIMILARITY_THRESHOLD,
+        )
+        for rank, r in enumerate(results, 1):
+            logger.info(
+                "  [%d] score=%.4f  section=%r  preview=%r",
+                rank, r["score"], r["section"], r["content"][:120],
+            )
+
         return results
 
     # ── Mutation ──────────────────────────────────────────────────────────── #
