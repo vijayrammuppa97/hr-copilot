@@ -6,6 +6,7 @@ export interface Message {
   content: string
   sources?: string[]
   confidence?: number
+  followUpQuestions?: string[]
   timestamp: string
   isError?: boolean
   feedback?: FeedbackValue | null

@@ -227,11 +227,17 @@ const App: React.FC = () => {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           try {
-            const evt = JSON.parse(line.slice(6)) as { type: string; text?: string; sources?: string[]; confidence?: number; timestamp?: string; message?: string }
+            const evt = JSON.parse(line.slice(6)) as { type: string; text?: string; sources?: string[]; confidence?: number; follow_up_questions?: string[]; timestamp?: string; message?: string }
             if (evt.type === 'token' && evt.text) {
               setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: m.content + evt.text } : m))
             } else if (evt.type === 'done') {
-              setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, sources: evt.sources ?? [], confidence: evt.confidence ?? 0, timestamp: evt.timestamp ?? m.timestamp } : m))
+              setMessages((prev) => prev.map((m) => m.id === assistantId ? {
+                ...m,
+                sources: evt.sources ?? [],
+                confidence: evt.confidence ?? 0,
+                followUpQuestions: evt.follow_up_questions ?? [],
+                timestamp: evt.timestamp ?? m.timestamp,
+              } : m))
             } else if (evt.type === 'error') {
               throw new Error(evt.message ?? 'Stream error')
             }
@@ -368,7 +374,12 @@ const App: React.FC = () => {
           <main className="flex-1 overflow-y-auto scrollbar-dark" role="main" aria-live="polite" aria-atomic="false" aria-relevant="additions">
             <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
               {messages.map((msg) => (
-                <ChatMessage key={msg.id} message={msg} onRetry={msg.isError ? handleRetry : undefined} />
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  onRetry={msg.isError ? handleRetry : undefined}
+                  onFollowUp={(q) => void sendMessage(q)}
+                />
               ))}
               {isLoading && <LoadingSkeleton />}
               <div ref={messagesEndRef} aria-hidden="true" />

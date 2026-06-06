@@ -247,6 +247,22 @@ def get_conversations(limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_history_from_db(conversation_id: str, limit: int = 12) -> list[dict[str, str]]:
+    """Return the last `limit` turns as {role, content} dicts for LLM history."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content FROM messages
+            WHERE conversation_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        ).fetchall()
+    # Reverse so oldest turn is first (LLM expects chronological order)
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
 def get_conversation_messages(conversation_id: str) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(

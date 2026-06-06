@@ -42,6 +42,7 @@ from database import (
     init_db, save_exchange, save_feedback,
     get_conversations, get_conversation_messages, get_feedback_summary,
     get_admin_stats, get_top_interactions, get_confidence_distribution, get_messages_over_time,
+    get_history_from_db,
 )
 from case_manager import (
     create_case, get_case, get_all_cases,
@@ -53,6 +54,7 @@ from user_manager import (
     update_user_profile, build_profile_context,
 )
 from profile_extractor import extract_profile_facts
+from followup_generator import generate_follow_up_questions
 from evaluation import log_evaluation, get_evaluation_summary
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
@@ -78,7 +80,6 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 
-_conversation_store: dict[str, list[dict[str, str]]] = {}
 MAX_HISTORY_ENTRIES = 12
 
 # ── Admin auth ────────────────────────────────────────────────────────────── #
@@ -332,7 +333,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
         if user_data:
             user_profile_ctx = build_profile_context(user_data)
 
-    history    = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
+    history    = get_history_from_db(cid, limit=MAX_HISTORY_ENTRIES)
     # Expand query with rule-based synonym rewriting, then search
     extra_queries = query_rewriter.expand(body.message)[1:]   # skip original (index 0)
     loop          = asyncio.get_event_loop()
@@ -355,14 +356,6 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
 
-            store = _conversation_store.setdefault(cid, [])
-            store.extend([
-                {"role": "user",      "content": body.message},
-                {"role": "assistant", "content": full_text},
-            ])
-            if len(store) > MAX_HISTORY_ENTRIES:
-                _conversation_store[cid] = store[-MAX_HISTORY_ENTRIES:]
-
             save_exchange(cid, body.message, full_text, sources, confidence)
 
             # Memory extraction — parse the user's message for profile facts
@@ -383,7 +376,8 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
             # Log evaluation metrics
             eval_metrics = log_evaluation(cid, body.message, kb_results, full_text, k=3)
 
-            yield f"data: {json.dumps({'type': 'done', 'sources': sources, 'confidence': round(confidence, 2), 'eval': eval_metrics, 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
+            follow_ups = generate_follow_up_questions(kb_results)
+            yield f"data: {json.dumps({'type': 'done', 'sources': sources, 'confidence': round(confidence, 2), 'follow_up_questions': follow_ups, 'eval': eval_metrics, 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
 
         except Exception as exc:
             logger.error("LLM stream error cid=%r: %s", cid, exc, exc_info=True)
