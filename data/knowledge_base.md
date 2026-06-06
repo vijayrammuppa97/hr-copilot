@@ -213,6 +213,20 @@ Acme provides all equipment necessary for effective remote work:
 
 Employees must **not use personal devices** for work involving sensitive company data, client records, or confidential information unless explicitly approved in writing by IT Security. Lost or stolen company equipment must be reported to IT Security within **4 hours** of discovery.
 
+## 2.6.1 Lost or Stolen Company Equipment — Reporting Procedure
+
+If your company laptop, phone, or any Acme-issued device is **lost or stolen**, you must:
+
+1. **Report immediately to IT Security** at it-security@acme.com within **4 hours** of discovering the loss.
+2. Contact your **direct manager** as soon as possible (text or email is acceptable).
+3. File a **police report** if the device was stolen and share the reference number with IT Security.
+4. IT Security will remotely wipe the device and revoke access credentials within 2 hours of your report.
+5. Do **not** attempt to recover the device yourself or delay reporting — unauthorised delay may result in disciplinary action.
+
+**Replacement:** A replacement device will be issued within 2 business days. Employees are not financially liable for theft if reported within the 4-hour window, provided reasonable care was taken.
+
+**Source:** Acme IT Security Policy, Section 2.6
+
 ## 2.7 Internet, Security, and Connectivity Requirements
 
 **Network security:**

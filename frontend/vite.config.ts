@@ -7,8 +7,15 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (_proxyReq, req) => {
+            if (req.headers.accept?.includes('text/event-stream')) {
+              _proxyReq.setHeader('Accept', 'text/event-stream')
+            }
+          })
+        },
       },
     },
   },

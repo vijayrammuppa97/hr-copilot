@@ -1,20 +1,30 @@
 """
-HR Knowledge Base — multi-document, semantic search, fuzzy/typo-tolerant retrieval.
+HR Knowledge Base — Hybrid RAG pipeline.
 
-Search pipeline:
-  1. Text normalisation  — lowercase, collapse hyphens, strip punctuation
-  2. Fuzzy expansion     — difflib finds near-matches for each query token
-  3. Policy keyword boost — 2.5× multiplier when query matches known HR section names
-                            (Annual Leave, Sick Leave, Paternity Leave, Remote Work, etc.)
-  4. Semantic search     — cosine similarity on Ollama nomic-embed-text embeddings (primary)
-  5. Keyword re-rank     — Jaccard boosts exact/fuzzy matches (secondary signal)
-  6. Score blend         — 0.75 × semantic + 0.25 × keyword
-  7. Similarity threshold — results below 0.25 are dropped to prevent irrelevant retrieval
-  8. Per-query logging   — every retrieved chunk is logged so failures can be diagnosed
+Full pipeline (per query):
+  User Query
+      ↓
+  Query Rewriter  (query_rewriter.py)
+      ↓
+  Hybrid Search
+      ├── BM25      (bm25_index.py)     — keyword precision
+      └── Semantic  (embeddings.py)     — meaning recall
+      ↓
+  RRF Fusion  — Reciprocal Rank Fusion combines both ranked lists
+      ↓
+  Reranker    (reranker.py)            — CrossEncoder > Ollama > ScoreFusion
+      ↓
+  Top-K Chunks  → LLM
+
+Additional signals:
+  - Policy keyword boost (2.5×) — known HR section names
+  - Content keyword boost (2.0×) — critical terms in chunk text
+  - Fuzzy query expansion        — handles typos via difflib
+  - Similarity threshold         — drops noise below 0.12
+  - Per-query chunk logging      — every retrieved section logged
 
 Admin folder:
-  All files inside data/knowledge_docs/ are indexed on startup.
-  The DocumentWatcher (document_watcher.py) calls reload_file() on changes.
+  Files in data/knowledge_docs/ are indexed on startup and watched for changes.
 """
 
 import difflib
@@ -22,7 +32,38 @@ import logging
 import re
 from pathlib import Path
 
+# Patterns that indicate the user is providing personal tenure/context
+_TENURE_RE = re.compile(
+    r"\b(\d+)\s*(year|yr|month|day)s?\b"
+    r"|working\s+since|been\s+here|joined|years?\s+of\s+service"
+    r"|experience|tenure|employed\s+for",
+    re.IGNORECASE,
+)
+
+# Section title fragments that must always be included when certain topics are detected
+_GUARANTEED_SECTIONS: list[tuple[re.Pattern, str]] = [
+    # Tenure mentioned → always include the tenure entitlement table
+    (_TENURE_RE,
+     "Annual Leave Days by Tenure"),
+    # Mental health query → include sick leave policy (MH days come from sick balance)
+    (re.compile(r"mental\s+health|wellbeing|burnout", re.IGNORECASE),
+     "Sick Leave Policy"),
+    # Sick leave queries → include the sick leave policy
+    (re.compile(r"sick|ill|medical|doctor",           re.IGNORECASE),
+     "Sick Leave Policy"),
+    # Remote work + days/how many → always include section 2.3 (the actual days-per-week table)
+    (re.compile(r"(how\s+many|days?|per\s+week).{0,30}(remote|wfh|work\s+from\s+home)"
+                r"|(remote|wfh|work\s+from\s+home).{0,30}(how\s+many|days?|per\s+week)",
+                re.IGNORECASE),
+     "Remote Work Days Allowed"),
+    # Eligibility for remote → also include days table so LLM can give complete picture
+    (re.compile(r"eligib|can\s+i\s+work\s+from\s+home|allowed\s+to\s+work\s+remote",
+                re.IGNORECASE),
+     "Remote Work Days Allowed"),
+]
+
 from embeddings import EmbeddingGenerator, VectorStore
+from bm25_index import BM25Index
 from document_loader import parse_document
 
 logger = logging.getLogger("hr_copilot.knowledge")
@@ -36,32 +77,91 @@ _STOP_WORDS: frozenset[str] = frozenset(
 
 # Similarity threshold — chunks below this score are dropped from results.
 # Prevents completely irrelevant sections polluting the LLM context.
-SIMILARITY_THRESHOLD = 0.25
+SIMILARITY_THRESHOLD = 0.12   # permissive enough to catch short policy sentences
 
 # Policy section keyword map — when a query mentions these terms,
 # chunks whose headings contain the matched keywords receive a 2.5× boost.
 # This directly fixes the "paternity leave → Jury Duty" class of errors.
 _POLICY_KEYWORDS: dict[str, list[str]] = {
-    "annual leave":        ["annual", "leave", "vacation", "holiday"],
-    "sick leave":          ["sick", "medical", "illness", "doctor", "certificate"],
-    "paternity leave":     ["paternity", "father", "paternal"],
-    "maternity leave":     ["maternity", "mother", "maternal", "pregnancy"],
-    "parental leave":      ["parental", "parent", "baby", "newborn", "adoption"],
-    "remote work":         ["remote", "wfh", "work from home", "hybrid"],
-    "grievance":           ["grievance", "complaint", "formal", "dispute"],
+    "annual leave":        ["annual", "leave", "vacation", "holiday", "pto", "paid time off",
+                            "time off", "days off", "vacation days", "annual leave"],
+    "sick leave":          ["sick", "medical", "illness", "doctor", "certificate", "flu",
+                            "cold", "unwell", "sick day", "call in sick", "off sick"],
+    "paternity leave":     ["paternity", "father", "paternal", "dad", "new dad",
+                            "non-birthing", "secondary caregiver", "birth of child",
+                            "newborn", "birth registration"],
+    "maternity leave":     ["maternity", "mother", "maternal", "pregnancy", "pregnant",
+                            "birthing", "expecting", "due date", "prenatal", "birth parent",
+                            "birthing parent"],
+    "parental leave":      ["parental", "parent", "shared parental"],
+    "adoption leave":      ["adoption", "adopt", "adoptive", "adopting", "adopted",
+                            "child placement"],
+    "remote work":         ["remote", "wfh", "work from home", "hybrid", "work remotely",
+                            "home office", "days per week", "work remotely", "remote days"],
+    "grievance":           ["grievance", "complaint", "formal", "dispute", "raise a concern",
+                            "formal complaint"],
     "performance":         ["performance", "review", "appraisal", "pip"],
-    "resignation":         ["resign", "notice", "termination", "leaving"],
-    "expense":             ["expense", "reimbursement", "claim", "receipt"],
-    "equipment":           ["equipment", "laptop", "device", "hardware", "stolen", "lost"],
-    "harassment":          ["harassment", "bully", "posh", "misconduct"],
-    "overtime":            ["overtime", "extra hours", "additional hours"],
-    "carry forward":       ["carry", "carryover", "rollover", "unused leave"],
-    "emergency leave":     ["emergency", "bereavement", "compassionate", "funeral"],
-    "jury duty":           ["jury", "civic", "court", "witness"],
+    "resignation":         ["resign", "notice", "termination", "leaving", "quit"],
+    "expense":             ["expense", "reimbursement", "claim", "receipt", "reimburse"],
+    "equipment":           ["equipment", "laptop", "device", "hardware", "stolen", "lost",
+                            "company equipment"],
+    "harassment":          ["harassment", "bully", "posh", "misconduct", "bullying"],
+    "carry forward":       ["carry", "carryover", "rollover", "unused leave", "roll over",
+                            "vacation rollover", "unused days", "leave balance"],
+    "emergency leave":     ["emergency", "bereavement", "compassionate", "funeral", "death",
+                            "grief", "family death", "passed away", "condolence"],
+    "jury duty":           ["jury", "civic", "court", "witness", "jury service",
+                            "court attendance", "jury summons", "civic duty"],
     "training":            ["training", "learning", "development", "course", "lms"],
     "payroll":             ["payroll", "salary", "pay", "bank", "tax", "deduction"],
     "onboarding":          ["onboarding", "joining", "induction", "first day"],
 }
+
+
+def _content_keyword_boost(query_tokens: set[str], content: str) -> float:
+    """
+    Direct content-level boost for queries that contain high-signal terms
+    which also appear in the chunk content.
+    Handles cases like stolen-laptop where the key sentence is a short paragraph
+    that would otherwise score too low on title matching alone.
+    """
+    content_lower = content.lower()
+    # High-signal term pairs: if query has term_a AND content has term_b, boost
+    signal_pairs = [
+        # Equipment — specific to 2.6.1
+        ({"stolen", "theft", "missing", "lost"}, {"it security", "4 hours", "report"}),
+        # Annual leave — use "pre-approved" / "calendar year" as discriminators
+        # Exclude "vacation" to avoid boosting 1.1 over 1.4 for "vacation rollover" queries
+        ({"pto", "paid time off", "days off", "how many days", "days per year"},
+         {"entitlement", "calendar year", "accrues", "pre-approved"}),
+        # Sick leave — specific to 1.6/1.7 (not mental health)
+        ({"sick", "illness", "medical", "flu", "cold", "unwell", "sick day"},
+         {"consecutive", "documentation", "certificate", "sick leave"}),
+        # Paternity — "non-birthing" and "secondary caregiver" are ONLY in 1.10
+        # Do NOT include "paternity" in content_set — section 1.12 also mentions it
+        ({"paternity", "father", "dad", "new dad", "non-birthing"},
+         {"non-birthing", "secondary caregiver"}),
+        # Maternity — use "birthing" / "due date" as discriminator (only in 1.9)
+        ({"maternity", "pregnancy", "pregnant", "expecting", "birthing"},
+         {"birthing", "due date", "pre-natal", "post-natal"}),
+        # Carry-forward — use "roll over" / "carry-forward" as discriminator (only in 1.4)
+        ({"rollover", "roll over", "vacation rollover", "carryover", "carry forward", "unused"},
+         {"carry-forward", "roll over", "forfeited", "december 31"}),
+        # Grievance
+        ({"grievance", "complaint", "dispute", "formal complaint"},
+         {"acknowledgement", "investigation", "working days"}),
+        # Remote work
+        ({"remote", "wfh", "work from home", "work remotely"},
+         {"eligible", "hybrid", "home office"}),
+        # Bereavement — specific to 1.13 (only section with "immediate family")
+        ({"bereavement", "death", "funeral", "grief", "family death", "passed away"},
+         {"immediate family", "bereavement", "obituary"}),
+    ]
+    for query_set, content_set in signal_pairs:
+        if any(q in " ".join(query_tokens) for q in query_set):
+            if any(c in content_lower for c in content_set):
+                return 2.0   # strong boost for content-matched policy chunks
+    return 1.0
 
 
 def _policy_title_boost(query_tokens: set[str], section_title: str) -> float:
@@ -79,7 +179,7 @@ def _policy_title_boost(query_tokens: set[str], section_title: str) -> float:
         # Check if the section title also contains any keyword from the group
         title_matches = any(kw in title_lower for kw in keywords)
         if title_matches:
-            return 2.5
+            return 3.0
     return 1.0
 
 
@@ -121,6 +221,31 @@ def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: float = 0.80
     return expanded
 
 
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────────── #
+
+def _rrf_fusion(rankings: list[list[dict]], k: int = 60) -> list[dict]:
+    """
+    Combine multiple ranked lists into one using Reciprocal Rank Fusion.
+    RRF score for doc d = Σ_i  1 / (k + rank_i(d))
+
+    Advantages over score normalisation:
+    - Robust to different score scales across BM25 and cosine
+    - Doesn't require calibrated scores
+    - Consistently outperforms linear score combination in IR benchmarks
+    """
+    rrf_scores: dict[str, float] = {}
+    doc_store:  dict[str, dict]  = {}
+
+    for ranking in rankings:
+        for rank, doc in enumerate(ranking):
+            key = f"{doc['section']}|||{doc['content'][:80]}"
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            doc_store[key]  = doc
+
+    sorted_keys = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
+    return [{**doc_store[k], "rrf_score": round(rrf_scores[k], 6)} for k in sorted_keys]
+
+
 # ── Knowledge section ─────────────────────────────────────────────────────── #
 
 class KnowledgeSection:
@@ -150,13 +275,16 @@ class KnowledgeBase:
         self._sections: list[KnowledgeSection] = []
         self._vocab: set[str] = set()
 
-        # Semantic store (may be unavailable if Ollama is down at startup)
+        # BM25 keyword index
+        self._bm25 = BM25Index()
+
+        # Semantic vector store (may be unavailable if Ollama is down at startup)
         try:
             self._gen   = EmbeddingGenerator(host=embed_host)
             self._store = VectorStore(self._gen)
             self._semantic_ok = True
         except Exception as exc:
-            logger.warning("Embedding store unavailable — falling back to keyword search: %s", exc)
+            logger.warning("Embedding store unavailable — falling back to BM25 only: %s", exc)
             self._store = None
             self._gen   = None
             self._semantic_ok = False
@@ -177,9 +305,10 @@ class KnowledgeBase:
                 self._index_file(path)
 
         self._rebuild_vocab()
+        self._rebuild_bm25()
         logger.info(
-            "KnowledgeBase ready — %d sections, %d vocab tokens, semantic=%s",
-            len(self._sections), len(self._vocab), self._semantic_ok,
+            "KnowledgeBase ready — %d sections, %d vocab tokens, semantic=%s, bm25=%s",
+            len(self._sections), len(self._vocab), self._semantic_ok, self._bm25.doc_count > 0,
         )
 
     def _index_file(self, path: Path) -> None:
@@ -223,96 +352,127 @@ class KnowledgeBase:
             vocab.update(s.tokens)
         self._vocab = vocab
 
+    def _rebuild_bm25(self) -> None:
+        self._bm25.build([
+            {"section": s.section, "content": s.content, "source_file": s.source_file}
+            for s in self._sections
+        ])
+
     # ── Search ────────────────────────────────────────────────────────────── #
 
-    def search(self, query: str, top_k: int = 8) -> list[dict]:
+    def search(self, query: str, top_k: int = 8, extra_queries: list[str] | None = None) -> list[dict]:
         """
         Retrieve the top_k most relevant sections for a query.
 
-        Pipeline:
-          1. Normalise + fuzzy-expand query tokens
-          2. Semantic similarity (nomic-embed-text cosine)
-          3. Keyword Jaccard re-rank
-          4. Policy section title keyword boost (2.5×)
-          5. Similarity threshold filter (drops score < SIMILARITY_THRESHOLD)
-          6. Log every retrieved chunk for diagnosis
+        Hybrid pipeline:
+          1. Fuzzy-expand query tokens (typo tolerance)
+          2. BM25 keyword search on primary query + all extra_queries
+          3. Semantic search on primary query + all extra_queries
+          4. RRF fusion of all BM25 + semantic ranked lists
+          5. Policy title + content keyword boosts applied post-fusion
+          6. Similarity threshold filter
+          7. Log all retrieved chunks
         """
         if not self._sections:
             return []
 
-        q_tokens = _tokenize(query)
+        all_queries = [query] + (extra_queries or [])
+        q_tokens    = _tokenize(query)
         if not q_tokens:
             return [
                 {"section": s.section, "content": s.content, "source_file": s.source_file, "score": 0.0}
                 for s in self._sections[:top_k]
             ]
 
-        # 1. Fuzzy-expand to fix typos
+        # 1. Fuzzy-expand for typo tolerance
         expanded_tokens = _fuzzy_expand(q_tokens, self._vocab, cutoff=0.80)
 
-        # 2. Semantic scores from vector store
-        semantic_scores: dict[int, float] = {}
+        # 2 + 3. BM25 + Semantic for all query variants
+        all_rankings: list[list[dict]] = []
+
+        # BM25 for each query
+        for q in all_queries:
+            bm25_results = self._bm25.search(q, top_k=20)
+            if bm25_results:
+                all_rankings.append(bm25_results)
+
+        # Semantic for each query
         if self._store and self._semantic_ok:
-            # Request 3× top_k candidates so re-ranking has room to work
-            sem_results = self._store.search(query, top_k=min(top_k * 3, 30))
-            for res in sem_results:
-                for i, s in enumerate(self._sections):
-                    if s.section == res["section"] and s.content == res["content"]:
-                        semantic_scores[i] = res.get("score", 0.0)
-                        break
+            for q in all_queries:
+                sem_results = self._store.search(q, top_k=20)
+                if sem_results:
+                    all_rankings.append(sem_results)
 
-        # 3+4. Keyword + policy boost scoring
-        scored: list[tuple[float, int]] = []
-        for i, sec in enumerate(self._sections):
-            kw_score = _jaccard(expanded_tokens, sec.tokens)
+        # 4. RRF fusion
+        if all_rankings:
+            fused = _rrf_fusion(all_rankings)
+        else:
+            # Fallback: pure Jaccard if both BM25 and semantic unavailable
+            scored_fb: list[tuple[float, int]] = []
+            for i, sec in enumerate(self._sections):
+                sc = _jaccard(expanded_tokens, sec.tokens)
+                if sc > 0:
+                    scored_fb.append((sc, i))
+            scored_fb.sort(reverse=True)
+            fused = [
+                {"section": self._sections[i].section, "content": self._sections[i].content,
+                 "source_file": self._sections[i].source_file, "score": round(s, 4), "rrf_score": round(s, 4)}
+                for s, i in scored_fb[:top_k * 2]
+            ]
 
-            # 3a. Heading token match bonus
-            if expanded_tokens & _tokenize_set(sec.section):
-                kw_score *= 1.4
+        # 5. Apply policy + content boosts to the fused list
+        boosted: list[tuple[float, dict]] = []
+        for doc in fused:
+            base   = doc.get("rrf_score", doc.get("score", 0.0))
+            pb     = _policy_title_boost(expanded_tokens, doc["section"])
+            cb     = _content_keyword_boost(expanded_tokens, doc["content"])
+            # Multiplicative when both fire — compounds signal (e.g. 3.0 × 2.0 = 6.0×)
+            boost  = pb * cb if pb > 1.0 and cb > 1.0 else max(pb, cb)
+            final  = base * boost if boost > 1.0 else base
+            d      = dict(doc)
+            d["score"] = round(final, 4)
+            boosted.append((final, d))
 
-            # 4. Policy keyword title boost — biggest fix for wrong-section retrieval
-            policy_boost = _policy_title_boost(expanded_tokens, sec.section)
-            kw_score *= policy_boost
+        boosted.sort(key=lambda x: x[0], reverse=True)
 
-            sem_score = semantic_scores.get(i, 0.0)
-
-            if self._semantic_ok and sem_score > 0:
-                combined = 0.75 * sem_score + 0.25 * kw_score
-            else:
-                combined = kw_score  # fallback to keyword-only
-
-            # Apply policy boost to combined score too
-            combined *= policy_boost if policy_boost > 1.0 and sem_score > 0 else 1.0
-
-            if combined > 0:
-                scored.append((combined, i))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        # 5. Similarity threshold — drop irrelevant results
-        results = []
-        for score, idx in scored[:top_k * 2]:   # over-fetch then filter
+        # 6. Threshold filter (always keep at least 3)
+        results: list[dict] = []
+        for score, doc in boosted[:top_k * 2]:
             if score < SIMILARITY_THRESHOLD and len(results) >= 3:
-                break   # always keep at least 3 even if below threshold
-            s = self._sections[idx]
-            results.append({
-                "section":     s.section,
-                "content":     s.content,
-                "source_file": s.source_file,
-                "score":       round(score, 4),
-            })
+                break
+            results.append(doc)
             if len(results) >= top_k:
                 break
 
-        # 6. Log retrieved chunks for every query — critical for diagnosis
+        # 7. Guaranteed section injection
+        # When queries mention tenure or specific topics, ensure the relevant
+        # reference sections are always in context even if retrieval missed them.
+        existing_titles = {r["section"].lower() for r in results}
+        for pattern, required_fragment in _GUARANTEED_SECTIONS:
+            if pattern.search(query) and not any(required_fragment.lower() in t for t in existing_titles):
+                match = next(
+                    (s for s in self._sections if required_fragment.lower() in s.section.lower()),
+                    None,
+                )
+                if match:
+                    results.append({
+                        "section":     match.section,
+                        "content":     match.content,
+                        "source_file": match.source_file,
+                        "score":       0.0,
+                    })
+                    existing_titles.add(match.section.lower())
+                    logger.info("GUARANTEED section injected: %r", match.section)
+
+        # 8. Log for diagnosis
         logger.info(
-            "RETRIEVE query=%r top=%d threshold=%.2f",
-            query[:80], len(results), SIMILARITY_THRESHOLD,
+            "RETRIEVE query=%r variants=%d top=%d",
+            query[:60], len(all_queries), len(results),
         )
         for rank, r in enumerate(results, 1):
             logger.info(
                 "  [%d] score=%.4f  section=%r  preview=%r",
-                rank, r["score"], r["section"], r["content"][:120],
+                rank, r["score"], r["section"], r["content"][:100],
             )
 
         return results

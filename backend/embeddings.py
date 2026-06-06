@@ -2,8 +2,8 @@
 Semantic embedding store using Ollama's embedding API.
 
 Embeddings are generated locally — no external API keys required.
-Default model: nomic-embed-text (pull with: ollama pull nomic-embed-text)
-Fallback model: llama3.2 (already installed)
+Default model: bge-m3 (pull with: ollama pull bge-m3)
+Fallback model: nomic-embed-text
 
 Vector similarity: cosine similarity
 Storage: in-memory list + optional SQLite cache for persistence across restarts
@@ -25,7 +25,7 @@ _executor = ThreadPoolExecutor(max_workers=2)
 
 logger = logging.getLogger("hr_copilot.embeddings")
 
-EMBED_MODEL  = os.getenv("EMBED_MODEL", "nomic-embed-text")
+EMBED_MODEL  = os.getenv("EMBED_MODEL", "bge-m3")
 _CACHE_PATH  = Path(__file__).parent.parent / "data" / "embeddings_cache.db"
 
 
@@ -103,8 +103,8 @@ class EmbeddingGenerator:
             logger.info("Embedding model ready: %s", self._model)
         except Exception as exc:
             # Fall back to llama3.2 which is always available
-            logger.warning("Embed model %s unavailable (%s) — falling back to llama3.2", self._model, exc)
-            self._model = "llama3.2"
+            logger.warning("Embed model %s unavailable (%s) — falling back to nomic-embed-text", self._model, exc)
+            self._model = "nomic-embed-text"
 
     def embed(self, text: str, use_cache: bool = True) -> list[float]:
         text = text.strip()

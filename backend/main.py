@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 
 from knowledge_loader import KnowledgeBase
 from llm_handler import LLMHandler
+from query_rewriter import QueryRewriter
 from document_loader import parse_document, SUPPORTED_EXTENSIONS
 from document_watcher import DocumentWatcher
 from database import (
@@ -49,7 +50,9 @@ from case_manager import (
 from user_manager import (
     register_user, get_user, touch_user, get_user_sessions,
     get_all_users, create_session, update_session, generate_username, generate_user_id,
+    update_user_profile, build_profile_context,
 )
+from profile_extractor import extract_profile_facts
 from evaluation import log_evaluation, get_evaluation_summary
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
@@ -66,7 +69,7 @@ logger = logging.getLogger("hr_copilot")
 load_dotenv()
 
 KB_PATH      = os.getenv("KB_PATH", "../data/knowledge_base.md")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 ADMIN_TOKEN  = os.getenv("ADMIN_TOKEN", "hr-admin-secret-2024")
 CORS_ORIGINS = [
@@ -92,18 +95,20 @@ def require_admin(credentials: HTTPAuthorizationCredentials | None = Security(_b
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
 
-knowledge_base: KnowledgeBase
-llm_handler:    LLMHandler
-doc_watcher:    DocumentWatcher
+knowledge_base:  KnowledgeBase
+llm_handler:     LLMHandler
+doc_watcher:     DocumentWatcher
+query_rewriter:  QueryRewriter
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global knowledge_base, llm_handler, doc_watcher
+    global knowledge_base, llm_handler, doc_watcher, query_rewriter
     logger.info("Starting HR Onboarding Copilot v4 — model=%s", OLLAMA_MODEL)
     init_db()
     knowledge_base = KnowledgeBase(KB_PATH, embed_host=OLLAMA_HOST)
     llm_handler    = LLMHandler(model=OLLAMA_MODEL, host=OLLAMA_HOST)
+    query_rewriter = QueryRewriter(model=OLLAMA_MODEL, host=OLLAMA_HOST)
     doc_watcher    = DocumentWatcher(knowledge_base)
     doc_watcher.start()
     yield
@@ -124,7 +129,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -158,8 +163,19 @@ class FeedbackRequest(BaseModel):
 
 
 class RegisterUserRequest(BaseModel):
-    user_id:  str | None = None
-    username: str | None = None
+    user_id:         str   | None = None
+    username:        str   | None = None
+    tenure_years:    float | None = None
+    employment_type: str   | None = Field(default=None, max_length=50)
+    department:      str   | None = Field(default=None, max_length=100)
+    role:            str   | None = Field(default=None, max_length=100)
+
+
+class UpdateProfileRequest(BaseModel):
+    tenure_years:    float | None = None
+    employment_type: str   | None = Field(default=None, max_length=50)
+    department:      str   | None = Field(default=None, max_length=100)
+    role:            str   | None = Field(default=None, max_length=100)
 
 
 class CreateCaseRequest(BaseModel):
@@ -208,7 +224,7 @@ async def health_check() -> dict:
         "kb_sources":       knowledge_base.source_files,
         "semantic_enabled": knowledge_base.semantic_enabled,
         "model":            OLLAMA_MODEL,
-        "embed_model":      os.getenv("EMBED_MODEL", "nomic-embed-text"),
+        "embed_model":      os.getenv("EMBED_MODEL", "bge-m3"),
         "timestamp":        datetime.now(timezone.utc).isoformat(),
     }
 
@@ -223,8 +239,9 @@ async def debug_retrieve(q: str, top_k: int = 5) -> dict:
 
     Example: GET /api/debug/retrieve?q=paternity+leave
     """
+    extra   = query_rewriter.expand(q)[1:]
     loop    = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, knowledge_base.search, q)
+    results = await loop.run_in_executor(None, lambda: knowledge_base.search(q, extra_queries=extra))
     return {
         "query":   q,
         "results": [
@@ -248,8 +265,11 @@ async def register(body: RegisterUserRequest) -> dict:
     existing = get_user(uid)
     if existing:
         touch_user(uid)
-        return existing
-    return register_user(uid, username)
+        # Update profile fields if provided on re-registration
+        if any(v is not None for v in [body.tenure_years, body.employment_type, body.department, body.role]):
+            update_user_profile(uid, body.tenure_years, body.employment_type, body.department, body.role)
+        return get_user(uid) or existing
+    return register_user(uid, username, body.tenure_years, body.employment_type, body.department, body.role)
 
 
 @app.get("/api/users/{user_id}", tags=["users"])
@@ -259,6 +279,21 @@ async def get_user_profile(user_id: str) -> dict:
         raise HTTPException(status_code=404, detail="User not found")
     touch_user(user_id)
     return user
+
+
+@app.patch("/api/users/{user_id}/profile", tags=["users"])
+async def patch_user_profile(user_id: str, body: UpdateProfileRequest) -> dict:
+    """Update stored profile attributes for a user."""
+    if not get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    updated = update_user_profile(
+        user_id,
+        tenure_years=body.tenure_years,
+        employment_type=body.employment_type,
+        department=body.department,
+        role=body.role,
+    )
+    return updated or {}
 
 
 @app.get("/api/users/{user_id}/sessions", tags=["users"])
@@ -289,10 +324,21 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
         if case:
             case_context_str = build_case_context(case)
 
+    # Load user profile for context injection
+    user_profile_ctx: str | None = None
+    user_data: dict | None = None
+    if body.userId:
+        user_data = get_user(body.userId)
+        if user_data:
+            user_profile_ctx = build_profile_context(user_data)
+
     history    = _conversation_store.get(cid, [])[-MAX_HISTORY_ENTRIES:]
-    # Run embedding search in thread pool to avoid blocking the event loop
-    loop       = asyncio.get_event_loop()
-    kb_results = await loop.run_in_executor(None, knowledge_base.search, body.message)
+    # Expand query with rule-based synonym rewriting, then search
+    extra_queries = query_rewriter.expand(body.message)[1:]   # skip original (index 0)
+    loop          = asyncio.get_event_loop()
+    kb_results    = await loop.run_in_executor(
+        None, lambda: knowledge_base.search(body.message, extra_queries=extra_queries)
+    )
     sources    = [r["section"] for r in kb_results[:3]]
     confidence = llm_handler.estimate_confidence(kb_results)
 
@@ -304,6 +350,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
                 kb_context=kb_results,
                 history=history,
                 case_context=case_context_str,
+                user_profile=user_profile_ctx,
             ):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
@@ -317,6 +364,21 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
                 _conversation_store[cid] = store[-MAX_HISTORY_ENTRIES:]
 
             save_exchange(cid, body.message, full_text, sources, confidence)
+
+            # Memory extraction — parse the user's message for profile facts
+            # and persist any newly discovered attributes silently
+            if body.userId:
+                facts = extract_profile_facts(body.message)
+                if facts:
+                    # Only update fields not already set in the stored profile
+                    existing = user_data or {}
+                    new_facts = {
+                        k: v for k, v in facts.items()
+                        if existing.get(k) is None
+                    }
+                    if new_facts:
+                        update_user_profile(body.userId, **new_facts)
+                        logger.info("Profile updated for user=%r facts=%r", body.userId, new_facts)
 
             # Log evaluation metrics
             eval_metrics = log_evaluation(cid, body.message, kb_results, full_text, k=3)

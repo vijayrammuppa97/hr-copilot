@@ -108,12 +108,16 @@ def init_db() -> None:
                 FOREIGN KEY (case_id) REFERENCES onboarding_cases(case_id)
             );
 
-            -- Named users with random usernames
+            -- Named users with random usernames + profile attributes
             CREATE TABLE IF NOT EXISTS users (
-                user_id    TEXT PRIMARY KEY,
-                username   TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_seen  TEXT NOT NULL
+                user_id         TEXT PRIMARY KEY,
+                username        TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                last_seen       TEXT NOT NULL,
+                tenure_years    REAL DEFAULT NULL,
+                employment_type TEXT DEFAULT NULL,
+                department      TEXT DEFAULT NULL,
+                role            TEXT DEFAULT NULL
             );
 
             -- One session per conversation, linked to a user
@@ -148,7 +152,44 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_sessions_user  ON user_sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_eval_cid       ON evaluation_log(conversation_id);
         """)
+    # Migrate existing databases — add profile columns if missing
+    _migrate_user_profile_columns(conn)
     logger.info("SQLite database ready at %s", DB_PATH)
+
+
+def _migrate_user_profile_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    for col, definition in [
+        ("tenure_years",    "REAL DEFAULT NULL"),
+        ("employment_type", "TEXT DEFAULT NULL"),
+        ("department",      "TEXT DEFAULT NULL"),
+        ("role",            "TEXT DEFAULT NULL"),
+    ]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
+            logger.info("Migrated users table: added column %s", col)
+
+
+def update_user_profile(
+    user_id: str,
+    tenure_years:    float | None = None,
+    employment_type: str   | None = None,
+    department:      str   | None = None,
+    role:            str   | None = None,
+) -> dict | None:
+    """Update only the profile fields that are provided (non-None)."""
+    fields, values = [], []
+    if tenure_years    is not None: fields.append("tenure_years = ?");    values.append(tenure_years)
+    if employment_type is not None: fields.append("employment_type = ?"); values.append(employment_type)
+    if department      is not None: fields.append("department = ?");      values.append(department)
+    if role            is not None: fields.append("role = ?");            values.append(role)
+    if not fields:
+        return None
+    values.append(user_id)
+    with _connect() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE user_id = ?", values)
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def save_exchange(

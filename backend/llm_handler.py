@@ -25,16 +25,23 @@ logger = logging.getLogger("hr_copilot.llm")
 
 _GROUNDING_RULES = """\
 
-STRICT GROUNDING RULES — you MUST follow every rule below:
-1. Read every section inside <policy_context> carefully before responding.
-2. Your answer MUST be directly supported by text in those sections.
-3. Quote or closely paraphrase the exact policy wording when possible.
-4. If the answer is not present in the context, say EXACTLY:
+STRICT GROUNDING RULES — follow every rule below:
+1. Read ALL sections inside <policy_context> carefully before responding.
+2. Your answer MUST be grounded in those sections — do not invent policy details.
+3. PERSONAL CONTEXT + CALCULATIONS: When the user tells you their situation
+   (years of service, employment type, part-time hours, etc.), USE that information
+   to calculate their specific entitlement from the policy tables.
+   Example: user says "I have 3 years of service" + policy says "2–5 years = 18 days"
+   → answer "You are entitled to 18 days of annual leave."
+   Always show the reasoning: which tier they fall into and why.
+4. CROSS-REFERENCE: Combine information from multiple sections when needed to give
+   a complete answer. For example, mental health days come from the sick leave balance,
+   so reference both sections when relevant.
+5. DO perform arithmetic when applying policy rules (pro-rating, accrual, tenure tiers).
+6. If the answer is genuinely not in the context, say EXACTLY:
    "I could not find that information in our HR policy. Please contact HR at hr@company.com."
-5. NEVER use your own training knowledge about HR, employment law, or any company policy.
-6. NEVER guess, infer, or say "typically" / "usually" — only state what the policy explicitly says.
-7. NEVER mix information from different sections unless both sections are relevant to the question.
-8. At the end of your answer, cite the section(s) you used, e.g. "Source: 1.10 Paternity Leave".
+7. NEVER use training knowledge about HR law or generic HR practice — only the policy.
+8. At the end, cite ALL sections used. Example: "Source: 1.2 Annual Leave Days by Tenure, 1.8 Mental Health Days"
 """
 
 _ONBOARDING_SYSTEM = "You are an HR Onboarding Assistant for Acme." + _GROUNDING_RULES
@@ -53,6 +60,7 @@ class LLMHandler:
         kb_context: list[dict],
         history: list[dict[str, str]],
         case_context: str | None = None,
+        user_profile: str | None = None,
     ) -> AsyncGenerator[str, None]:
         system_content = (
             f"{_ONBOARDING_SYSTEM}\n\n{case_context}" if case_context
@@ -65,8 +73,16 @@ class LLMHandler:
         for turn in history[-6:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
 
-        user_content = f"{user_message}\n\n{kb_block}" if kb_block else user_message
+        # Silently prepend the stored profile so the LLM always knows who it's talking to.
+        # Placed before the user message so it doesn't alter the conversational tone.
+        if user_profile:
+            effective_message = f"{user_profile}\n\n{user_message}"
+        else:
+            effective_message = user_message
+
+        user_content = f"{effective_message}\n\n{kb_block}" if kb_block else effective_message
         messages.append({"role": "user", "content": user_content})
+
 
         async for chunk in await self._client.chat(
             model=self._model,
@@ -74,7 +90,7 @@ class LLMHandler:
             options={
                 "num_predict": 400,
                 "temperature": 0.05,
-                "num_ctx":     3072,
+                "num_ctx":     8192,
                 "top_p":       0.9,
                 "repeat_penalty": 1.1,
             },
@@ -104,7 +120,7 @@ class LLMHandler:
         parts = []
         for i, r in enumerate(results[:8]):
             heading = r["section"]
-            content = r["content"][:600]
+            content = r["content"]          # full chunk — no truncation
             score   = r.get("score", 0.0)
             parts.append(f"[Section {i+1}: {heading} | relevance={score:.3f}]\n{content}")
 

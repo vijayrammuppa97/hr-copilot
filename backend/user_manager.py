@@ -15,7 +15,7 @@ import random
 import uuid
 from datetime import datetime, timezone
 
-from database import _connect
+from database import _connect, update_user_profile as _db_update_profile
 
 logger = logging.getLogger("hr_copilot.users")
 
@@ -51,16 +51,58 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def register_user(user_id: str, username: str) -> dict:
+def register_user(
+    user_id: str,
+    username: str,
+    tenure_years:    float | None = None,
+    employment_type: str   | None = None,
+    department:      str   | None = None,
+    role:            str   | None = None,
+) -> dict:
     now = _now()
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO users (user_id, username, created_at, last_seen)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO users (user_id, username, created_at, last_seen,
+                                  tenure_years, employment_type, department, role)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id) DO UPDATE SET last_seen = excluded.last_seen""",
-            (user_id, username, now, now),
+            (user_id, username, now, now, tenure_years, employment_type, department, role),
         )
-    return {"user_id": user_id, "username": username}
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return dict(row)
+
+
+def update_user_profile(
+    user_id: str,
+    tenure_years:    float | None = None,
+    employment_type: str   | None = None,
+    department:      str   | None = None,
+    role:            str   | None = None,
+) -> dict | None:
+    return _db_update_profile(
+        user_id,
+        tenure_years=tenure_years,
+        employment_type=employment_type,
+        department=department,
+        role=role,
+    )
+
+
+def build_profile_context(user: dict) -> str | None:
+    """Build a compact profile string to prepend to user messages silently."""
+    parts = []
+    if user.get("tenure_years") is not None:
+        yrs = user["tenure_years"]
+        parts.append(f"{yrs:g} year{'s' if yrs != 1 else ''} of service")
+    if user.get("employment_type"):
+        parts.append(user["employment_type"])
+    if user.get("department"):
+        parts.append(f"{user['department']} department")
+    if user.get("role"):
+        parts.append(f"role: {user['role']}")
+    if not parts:
+        return None
+    return "[Employee profile: " + ", ".join(parts) + "]"
 
 
 def get_user(user_id: str) -> dict | None:
