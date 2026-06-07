@@ -55,6 +55,7 @@ from user_manager import (
 )
 from profile_extractor import extract_profile_facts
 from followup_generator import generate_follow_up_questions
+from auth import signup as auth_signup, login as auth_login, logout as auth_logout, verify_token
 from evaluation import log_evaluation, get_evaluation_summary
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
@@ -179,6 +180,17 @@ class UpdateProfileRequest(BaseModel):
     role:            str   | None = Field(default=None, max_length=100)
 
 
+class SignupRequest(BaseModel):
+    email:     str = Field(..., min_length=5, max_length=200)
+    password:  str = Field(..., min_length=8, max_length=200)
+    full_name: str = Field(..., min_length=1, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email:    str = Field(..., min_length=5, max_length=200)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
 class CreateCaseRequest(BaseModel):
     employee_name:  str = Field(..., min_length=1, max_length=200)
     employee_email: str = Field(..., min_length=3, max_length=200)
@@ -255,6 +267,43 @@ async def debug_retrieve(q: str, top_k: int = 5) -> dict:
             for i, r in enumerate(results[:top_k])
         ],
     }
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────── #
+
+@app.post("/api/auth/signup", tags=["auth"])
+@limiter.limit("5/minute")
+async def signup(request: Request, body: SignupRequest) -> dict:
+    result = auth_signup(body.email, body.password, body.full_name)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return {"token": result["token"], "email": result["email"], "full_name": result["full_name"], "user_id": result["user_id"]}
+
+
+@app.post("/api/auth/login", tags=["auth"])
+@limiter.limit("10/minute")
+async def login(request: Request, body: LoginRequest) -> dict:
+    result = auth_login(body.email, body.password)
+    if not result["ok"]:
+        raise HTTPException(status_code=401, detail=result["error"])
+    return {"token": result["token"], "email": result["email"], "full_name": result["full_name"], "user_id": result["user_id"]}
+
+
+@app.post("/api/auth/logout", tags=["auth"])
+async def logout(credentials: HTTPAuthorizationCredentials | None = Security(_bearer)) -> dict:
+    if credentials:
+        auth_logout(credentials.credentials)
+    return {"status": "logged out"}
+
+
+@app.get("/api/auth/me", tags=["auth"])
+async def me(credentials: HTTPAuthorizationCredentials | None = Security(_bearer)) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired or invalid. Please log in again.")
+    return user
 
 
 # ── User management ───────────────────────────────────────────────────────── #

@@ -144,6 +144,26 @@ def init_db() -> None:
                 timestamp       TEXT NOT NULL
             );
 
+            -- Authenticated user accounts (email + hashed password)
+            CREATE TABLE IF NOT EXISTS auth_users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                email         TEXT UNIQUE NOT NULL,
+                full_name     TEXT DEFAULT '',
+                password_hash TEXT NOT NULL,
+                salt          TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                is_active     INTEGER DEFAULT 1
+            );
+
+            -- Login sessions — token issued on successful login
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token       TEXT PRIMARY KEY,
+                email       TEXT NOT NULL,
+                full_name   TEXT DEFAULT '',
+                created_at  TEXT NOT NULL,
+                expires_at  TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_cid   ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_feedback_cid   ON feedback(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_steps_case     ON case_workflow_steps(case_id);
@@ -151,6 +171,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_escl_case      ON escalations(case_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_user  ON user_sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_eval_cid       ON evaluation_log(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions  ON auth_sessions(token);
         """)
     # Migrate existing databases — add profile columns if missing
     _migrate_user_profile_columns(conn)

@@ -5,6 +5,8 @@ import SessionHistory from './SessionHistory'
 
 interface UploadedFile { name: string; sections: number }
 interface UserSession { session_id: string; started_at: string; updated_at: string; message_count: number; preview: string | null }
+interface AuthUser { token: string; email: string; full_name: string }
+interface UserProfile { tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null }
 
 interface Props {
   onNewChat: () => void
@@ -21,15 +23,32 @@ interface Props {
   userSessions: UserSession[]
   activeSessionId: string
   onSelectSession: (sessionId: string) => void
+  authUser: AuthUser | null
+  userProfile: UserProfile | null
+  onLogout: () => void
 }
+
+function getInitials(name: string): string {
+  return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+}
+
+const ProfileRow: React.FC<{ icon: string; label: string; value: string; muted?: boolean }> = ({ icon, label, value, muted }) => (
+  <div className="flex items-center gap-2">
+    <span className="text-[10px] w-4 flex-shrink-0">{icon}</span>
+    <span className="text-[9px] text-slate-600 w-16 flex-shrink-0">{label}</span>
+    <span className={`text-[10px] truncate flex-1 min-w-0 ${muted ? 'text-slate-700 italic' : 'text-slate-300'}`}>{value}</span>
+  </div>
+)
 
 const Sidebar: React.FC<Props> = ({
   onNewChat, case_, onStageClick, onCompleteItem, onEscalate,
   onAdvanceStage, onOpenAdmin, uploadedFiles, onUpload, isUploading,
   username, userSessions, activeSessionId, onSelectSession,
+  authUser, userProfile, onLogout,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showSessions, setShowSessions] = useState(false)
+  const [showProfile, setShowProfile] = useState(false)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -68,11 +87,79 @@ const Sidebar: React.FC<Props> = ({
             </svg>
           </button>
         </div>
-        {/* User identity */}
-        {username && (
-          <div className="mt-3 flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
-            <span className="text-[10px] text-slate-500 font-mono truncate">{username}</span>
+        {/* User profile card */}
+        {authUser && (
+          <div className="mt-3">
+            <button
+              onClick={() => setShowProfile(v => !v)}
+              className="w-full flex items-center gap-2.5 group text-left"
+              title="View profile"
+            >
+              {/* Avatar */}
+              <div className="w-7 h-7 rounded-full bg-indigo-600/30 border border-indigo-500/30 flex items-center justify-center flex-shrink-0">
+                <span className="text-[10px] font-bold text-indigo-300">{getInitials(authUser.full_name || authUser.email)}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[11px] font-medium text-slate-300 truncate leading-none">{authUser.full_name || authUser.email}</p>
+                <p className="text-[9px] text-slate-600 truncate mt-[2px]">{authUser.email}</p>
+              </div>
+              <svg className={`w-3 h-3 text-slate-700 flex-shrink-0 transition-transform ${showProfile ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {/* Expanded profile panel */}
+            {showProfile && (
+              <div className="mt-2.5 rounded-xl bg-white/[0.03] border border-white/[0.07] p-3 space-y-2.5">
+                <p className="text-[9px] font-semibold text-slate-600 uppercase tracking-[0.12em]">My Profile</p>
+
+                {/* Fields */}
+                <div className="space-y-1.5">
+                  <ProfileRow icon="✉" label="Email" value={authUser.email} />
+                  <ProfileRow icon="👤" label="Name" value={authUser.full_name || '—'} />
+                  <ProfileRow icon="🏷" label="Username" value={username || '—'} />
+                  <ProfileRow
+                    icon="📅"
+                    label="Tenure"
+                    value={userProfile?.tenure_years != null ? `${userProfile.tenure_years} year${userProfile.tenure_years !== 1 ? 's' : ''}` : 'Not set'}
+                    muted={userProfile?.tenure_years == null}
+                  />
+                  <ProfileRow
+                    icon="💼"
+                    label="Role"
+                    value={userProfile?.role || 'Not set'}
+                    muted={!userProfile?.role}
+                  />
+                  <ProfileRow
+                    icon="🏢"
+                    label="Department"
+                    value={userProfile?.department || 'Not set'}
+                    muted={!userProfile?.department}
+                  />
+                  <ProfileRow
+                    icon="⏱"
+                    label="Type"
+                    value={userProfile?.employment_type || 'Not set'}
+                    muted={!userProfile?.employment_type}
+                  />
+                </div>
+
+                <p className="text-[8px] text-slate-700 leading-relaxed">
+                  Profile fields auto-update when you mention them in chat (e.g. "I've worked here 3 years").
+                </p>
+
+                {/* Logout */}
+                <button
+                  onClick={onLogout}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[10px] font-medium text-rose-400 hover:text-rose-300 bg-rose-500/[0.06] hover:bg-rose-500/[0.12] border border-rose-500/[0.12] transition-all"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  Sign Out
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

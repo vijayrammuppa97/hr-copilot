@@ -7,13 +7,19 @@ import ErrorBoundary from './components/ErrorBoundary'
 import Sidebar from './components/Sidebar'
 import EscalationModal from './components/EscalationModal'
 import AdminDashboard from './components/AdminDashboard'
+import AuthPage from './components/AuthPage'
 
 const STORAGE_KEY         = 'hr_copilot_messages'
 const CONVERSATION_ID_KEY = 'hr_copilot_conversation_id'
 const CASE_ID_KEY         = 'hr_copilot_case_id'
 const USER_ID_KEY         = 'hr_copilot_user_id'
 const USERNAME_KEY        = 'hr_copilot_username'
+const AUTH_TOKEN_KEY      = 'hr_copilot_auth_token'
+const AUTH_EMAIL_KEY      = 'hr_copilot_auth_email'
+const AUTH_NAME_KEY       = 'hr_copilot_auth_name'
 const API_BASE            = import.meta.env.VITE_API_URL ?? ''
+
+interface AuthUser { token: string; email: string; full_name: string; user_id: string }
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
@@ -57,6 +63,12 @@ interface UserSession {
 }
 
 const App: React.FC = () => {
+  // ── Auth state ───────────────────────────────────────────────────────── //
+  const [authUser, setAuthUser]       = useState<AuthUser | null>(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [userProfile, setUserProfile] = useState<{ tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null } | null>(null)
+
+  // ── Chat / app state ─────────────────────────────────────────────────── //
   const [messages, setMessages]                   = useState<Message[]>(loadPersistedMessages)
   const [isLoading, setIsLoading]                 = useState(false)
   const [error, setError]                         = useState<string | null>(null)
@@ -74,10 +86,77 @@ const App: React.FC = () => {
   const conversationId = useRef<string>(getOrCreateConversationId())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // ── Register / restore user on mount ─────────────────────────────────── //
+  // ── Auth: verify stored token on mount ───────────────────────────────── //
   useEffect(() => {
-    const storedId   = localStorage.getItem(USER_ID_KEY)   ?? ''
-    const storedName = localStorage.getItem(USERNAME_KEY)  ?? ''
+    const token = localStorage.getItem(AUTH_TOKEN_KEY)
+    if (!token) { setAuthChecked(true); return }
+    fetch(`${API_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then((data: AuthUser | null) => {
+        if (data) {
+          setAuthUser(data)
+          localStorage.setItem(AUTH_TOKEN_KEY, data.token)
+          localStorage.setItem(AUTH_EMAIL_KEY, data.email)
+          localStorage.setItem(AUTH_NAME_KEY,  data.full_name)
+          localStorage.setItem(USER_ID_KEY,    data.user_id)
+        } else {
+          localStorage.removeItem(AUTH_TOKEN_KEY)
+          localStorage.removeItem(AUTH_EMAIL_KEY)
+          localStorage.removeItem(AUTH_NAME_KEY)
+        }
+      })
+      .catch(() => {
+        const email     = localStorage.getItem(AUTH_EMAIL_KEY) ?? ''
+        const full_name = localStorage.getItem(AUTH_NAME_KEY)  ?? ''
+        const user_id   = localStorage.getItem(USER_ID_KEY)    ?? ''
+        if (token && email) setAuthUser({ token, email, full_name, user_id })
+      })
+      .finally(() => setAuthChecked(true))
+  }, [])
+
+  const handleAuth = useCallback((user: AuthUser) => {
+    // Clear any previous user's data before setting new account
+    localStorage.setItem(AUTH_TOKEN_KEY,      user.token)
+    localStorage.setItem(AUTH_EMAIL_KEY,      user.email)
+    localStorage.setItem(AUTH_NAME_KEY,       user.full_name)
+    // Overwrite userId and username so session history is scoped to this account
+    localStorage.setItem(USER_ID_KEY,  user.user_id)
+    localStorage.removeItem(USERNAME_KEY)   // will be re-fetched from register call
+    localStorage.removeItem(STORAGE_KEY)    // clear chat from previous user
+    localStorage.removeItem(CONVERSATION_ID_KEY)
+    setMessages([])
+    setAuthUser(user)
+  }, [])
+
+  const handleLogout = useCallback(() => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY)
+    if (token) {
+      fetch(`${API_BASE}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {})
+    }
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+    localStorage.removeItem(AUTH_EMAIL_KEY)
+    localStorage.removeItem(AUTH_NAME_KEY)
+    localStorage.removeItem(USER_ID_KEY)
+    localStorage.removeItem(USERNAME_KEY)
+    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(CONVERSATION_ID_KEY)
+    setAuthUser(null)
+    setUserId('')
+    setUsername('')
+    setUserSessions([])
+    setUserProfile(null)
+    setMessages([])
+    setError(null)
+  }, [])
+
+  // ── Register / restore user — re-runs whenever the logged-in account changes ── //
+  useEffect(() => {
+    if (!authUser) return   // wait until auth is confirmed
+    const storedId   = localStorage.getItem(USER_ID_KEY)  ?? ''
+    const storedName = localStorage.getItem(USERNAME_KEY) ?? ''
 
     fetch(`${API_BASE}/api/users/register`, {
       method:  'POST',
@@ -85,10 +164,11 @@ const App: React.FC = () => {
       body:    JSON.stringify({ user_id: storedId || undefined, username: storedName || undefined }),
     })
       .then((r) => r.ok ? r.json() : null)
-      .then((data: { user_id: string; username: string } | null) => {
+      .then((data: { user_id: string; username: string; tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null } | null) => {
         if (data) {
           setUserId(data.user_id)
           setUsername(data.username)
+          setUserProfile({ tenure_years: data.tenure_years, employment_type: data.employment_type, department: data.department, role: data.role })
           localStorage.setItem(USER_ID_KEY,  data.user_id)
           localStorage.setItem(USERNAME_KEY, data.username)
           // Load session history
@@ -98,7 +178,7 @@ const App: React.FC = () => {
         }
       })
       .catch(() => { /* best-effort */ })
-  }, [])
+  }, [authUser?.user_id])   // re-run when account switches
 
   // ── Load case on mount ───────────────────────────────────────────────── //
   useEffect(() => {
@@ -297,6 +377,26 @@ const App: React.FC = () => {
     localStorage.removeItem(STORAGE_KEY)
   }, [])
 
+  // ── Auth gate ─────────────────────────────────────────────────────────── //
+  if (!authChecked) {
+    return (
+      <div className="flex h-screen bg-surface-base items-center justify-center">
+        <svg className="w-6 h-6 text-indigo-400 animate-spin-slow" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      </div>
+    )
+  }
+
+  if (!authUser) {
+    return (
+      <ErrorBoundary>
+        <AuthPage onAuth={handleAuth} />
+      </ErrorBoundary>
+    )
+  }
+
   if (caseLoading) {
     return (
       <div className="flex h-screen bg-surface-base items-center justify-center">
@@ -343,6 +443,9 @@ const App: React.FC = () => {
               setMessages([])
               localStorage.removeItem(STORAGE_KEY)
             }}
+            authUser={authUser}
+            userProfile={userProfile}
+            onLogout={handleLogout}
           />
         </div>
 
@@ -360,6 +463,13 @@ const App: React.FC = () => {
             <div className="flex items-center gap-2">
               {onboardingCase && <button onClick={() => setShowEscalation(true)} className="text-xs text-amber-500">Get Help</button>}
               {messages.length > 0 && <button onClick={clearChat} className="text-xs text-slate-600 hover:text-slate-400">Clear</button>}
+              <button
+                onClick={handleLogout}
+                title={`Signed in as ${authUser.email}`}
+                className="text-xs text-slate-600 hover:text-rose-400 transition-colors ml-1"
+              >
+                Sign out
+              </button>
             </div>
           </header>
 
