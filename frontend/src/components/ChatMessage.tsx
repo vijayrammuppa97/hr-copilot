@@ -17,9 +17,7 @@ function getConfidenceLabel(confidence: number | undefined, content: string): Co
   if (confidence === undefined) return null
   const notFound = content.includes('could not find that information') ||
                    content.includes('not in our HR policy')
-  if (notFound || confidence === 0) {
-    return { text: 'Not found in policy', classes: 'text-slate-500 bg-slate-500/[0.08] border-slate-500/20', dot: 'bg-slate-500' }
-  }
+  if (notFound || confidence === 0) return null
   if (confidence >= 0.6) {
     return { text: 'High confidence', classes: 'text-emerald-400 bg-emerald-500/[0.08] border-emerald-500/20', dot: 'bg-emerald-400' }
   }

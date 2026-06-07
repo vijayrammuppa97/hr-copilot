@@ -78,9 +78,9 @@ class DocumentWatcher:
                             continue
                         mtime = path.stat().st_mtime
                         if mtimes.get(path.name) != mtime:
-                            if path.name in mtimes:
-                                logger.info("File changed — re-indexing: %s", path.name)
-                                self._kb.reload_file(path)
+                            action = "changed" if path.name in mtimes else "added"
+                            logger.info("File %s — re-indexing: %s", action, path.name)
+                            self._kb.reload_file(path)
                             mtimes[path.name] = mtime
                 except Exception as exc:
                     logger.error("Watcher poll error: %s", exc)
