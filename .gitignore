@@ -42,3 +42,9 @@ logs/
 # ── Coverage ─────────────────────────────────────────────────────────────────
 .coverage
 htmlcov/
+
+# ── Runtime data — never commit ───────────────────────────────────────────────
+data/*.db
+data/*.db-shm
+data/*.db-wal
+training_qa_100.md
