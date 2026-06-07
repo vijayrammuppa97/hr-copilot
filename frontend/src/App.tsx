@@ -245,6 +245,7 @@ const App: React.FC = () => {
                 <ChatMessage
                   key={msg.id}
                   message={msg}
+                  isAdmin={isAdmin}
                   onRetry={msg.isError ? handleRetry : undefined}
                   onFollowUp={q => void sendMessage(q, userId, onboardingCase?.case_id)}
                 />
