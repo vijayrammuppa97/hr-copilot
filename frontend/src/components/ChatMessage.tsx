@@ -7,25 +7,6 @@ interface Props {
   onFollowUp?: (q: string) => void
 }
 
-interface ConfidenceLabel {
-  text: string
-  classes: string
-  dot: string
-}
-
-function getConfidenceLabel(confidence: number | undefined, content: string): ConfidenceLabel | null {
-  if (confidence === undefined) return null
-  const notFound = content.includes('could not find that information') ||
-                   content.includes('not in our HR policy')
-  if (notFound || confidence === 0) return null
-  if (confidence >= 0.6) {
-    return { text: 'High confidence', classes: 'text-emerald-400 bg-emerald-500/[0.08] border-emerald-500/20', dot: 'bg-emerald-400' }
-  }
-  if (confidence >= 0.3) {
-    return { text: 'Moderate confidence', classes: 'text-yellow-400 bg-yellow-500/[0.08] border-yellow-500/20', dot: 'bg-yellow-400' }
-  }
-  return { text: 'Low confidence — verify with HR', classes: 'text-amber-400 bg-amber-500/[0.08] border-amber-500/20', dot: 'bg-amber-400' }
-}
 
 function formatTime(iso: string): string {
   try {
@@ -51,9 +32,6 @@ const CheckIcon: React.FC = () => (
 const ChatMessage: React.FC<Props> = ({ message, onRetry, onFollowUp }) => {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
-  const confidenceLabel = !isUser && !message.isError
-    ? getConfidenceLabel(message.confidence, message.content)
-    : null
 
   const handleCopy = useCallback(async () => {
     try {
@@ -152,23 +130,6 @@ const ChatMessage: React.FC<Props> = ({ message, onRetry, onFollowUp }) => {
           <p className="text-[13px] text-slate-300 leading-[1.75] whitespace-pre-wrap break-words">{message.content}</p>
         </div>
 
-        {/* Confidence badge */}
-        {confidenceLabel && (
-          <div className="flex items-center gap-1.5 mt-2.5 px-0.5">
-            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-medium border ${confidenceLabel.classes}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${confidenceLabel.dot}`} />
-              {confidenceLabel.text}
-            </span>
-            {message.sources && message.sources.length > 0 && (
-              <span className="text-[10px] text-slate-600 flex items-center gap-1">
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                {message.sources.map(s => s.replace(/^knowledge_base\s*[—–-]\s*/i, '')).join(' · ')}
-              </span>
-            )}
-          </div>
-        )}
 
         {/* Follow-up question chips */}
         {message.followUpQuestions && message.followUpQuestions.length > 0 && onFollowUp && (
