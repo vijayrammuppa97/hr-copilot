@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from config import ADMIN_TOKEN
+from auth import verify_token
 from database import (
     get_conversations, get_conversation_messages, get_feedback_summary,
     get_admin_stats, get_top_interactions, get_confidence_distribution, get_messages_over_time,
@@ -16,8 +16,11 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def require_admin(credentials: HTTPAuthorizationCredentials | None = Security(_bearer)) -> None:
-    if not credentials or credentials.credentials != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid or missing admin token")
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = verify_token(credentials.credentials)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
 
 
 # ── Admin endpoints ────────────────────────────────────────────────────────── #

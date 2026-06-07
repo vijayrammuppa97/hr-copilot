@@ -4,9 +4,11 @@ const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const ALLOWED_DOMAIN = 'acme.com'
 
 interface AuthUser {
-  token: string
-  email: string
+  token:     string
+  email:     string
   full_name: string
+  user_id:   string
+  role?:     string
 }
 
 interface Props {

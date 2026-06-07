@@ -5,7 +5,7 @@ import SessionHistory from './SessionHistory'
 
 interface UploadedFile { name: string; sections: number }
 interface UserSession { session_id: string; started_at: string; updated_at: string; message_count: number; preview: string | null }
-interface AuthUser { token: string; email: string; full_name: string }
+interface AuthUser { token: string; email: string; full_name: string; user_id: string; role?: string }
 interface UserProfile { tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null }
 
 interface Props {
@@ -16,6 +16,7 @@ interface Props {
   onEscalate: () => void
   onAdvanceStage: () => void
   onOpenAdmin: () => void
+  isAdmin: boolean
   uploadedFiles: UploadedFile[]
   onUpload: (file: File) => void
   isUploading: boolean
@@ -42,7 +43,7 @@ const ProfileRow: React.FC<{ icon: string; label: string; value: string; muted?:
 
 const Sidebar: React.FC<Props> = ({
   onNewChat, case_, onStageClick, onCompleteItem, onEscalate,
-  onAdvanceStage, onOpenAdmin, uploadedFiles, onUpload, isUploading,
+  onAdvanceStage, onOpenAdmin, isAdmin, uploadedFiles, onUpload, isUploading,
   username, userSessions, activeSessionId, onSelectSession,
   authUser, userProfile, onLogout,
 }) => {
@@ -81,11 +82,13 @@ const Sidebar: React.FC<Props> = ({
               <p className="text-[10px] text-slate-600 leading-none mt-[3px]">Onboarding Copilot</p>
             </div>
           </div>
-          <button onClick={onOpenAdmin} title="Admin portal" className="w-6 h-6 flex items-center justify-center rounded-md text-slate-600 hover:text-indigo-400 hover:bg-white/[0.05] transition-all">
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-            </svg>
-          </button>
+          {isAdmin && (
+            <button onClick={onOpenAdmin} title="Admin portal" className="w-6 h-6 flex items-center justify-center rounded-md text-slate-600 hover:text-indigo-400 hover:bg-white/[0.05] transition-all">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </button>
+          )}
         </div>
         {/* User profile card */}
         {authUser && (

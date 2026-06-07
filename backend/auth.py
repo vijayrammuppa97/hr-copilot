@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 # Deterministic namespace — same email always produces the same user_id
 _USER_ID_NAMESPACE = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
 
-from database import _connect
+from database import _connect, get_user_role
 
 logger = logging.getLogger("hr_copilot.auth")
 
@@ -89,8 +89,7 @@ def signup(email: str, password: str, full_name: str) -> dict:
         )
 
     logger.info("New account created: %s", clean_email)
-    # Auto-login after signup
-    return _create_session(clean_email, full_name)
+    return _create_session(clean_email, full_name, role="user")
 
 
 def login(email: str, password: str) -> dict:
@@ -105,7 +104,7 @@ def login(email: str, password: str) -> dict:
 
     with _connect() as conn:
         row = conn.execute(
-            "SELECT password_hash, salt, full_name, is_active FROM auth_users WHERE email = ?",
+            "SELECT password_hash, salt, full_name, is_active, role FROM auth_users WHERE email = ?",
             (clean_email,),
         ).fetchone()
 
@@ -120,7 +119,7 @@ def login(email: str, password: str) -> dict:
         return {"ok": False, "error": "Invalid email or password."}
 
     logger.info("Login successful: %s", clean_email)
-    return _create_session(clean_email, row["full_name"])
+    return _create_session(clean_email, row["full_name"], role=row["role"] or "user")
 
 
 def verify_token(token: str) -> dict | None:
@@ -140,11 +139,13 @@ def verify_token(token: str) -> dict | None:
     if row["expires_at"] < now:
         _delete_session(token)
         return None
+    role = get_user_role(row["email"])
     return {
         "email":     row["email"],
         "full_name": row["full_name"],
         "token":     token,
         "user_id":   email_to_user_id(row["email"]),
+        "role":      role,
     }
 
 
@@ -161,7 +162,7 @@ def email_to_user_id(email: str) -> str:
     return str(uuid.uuid5(_USER_ID_NAMESPACE, email.lower()))
 
 
-def _create_session(email: str, full_name: str) -> dict:
+def _create_session(email: str, full_name: str, role: str = "user") -> dict:
     token = str(uuid.uuid4())
     now = _now()
     expires = _expires()
@@ -171,7 +172,7 @@ def _create_session(email: str, full_name: str) -> dict:
             "INSERT INTO auth_sessions (token, email, full_name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
             (token, email, full_name, now, expires),
         )
-    return {"ok": True, "token": token, "email": email, "full_name": full_name, "user_id": user_id}
+    return {"ok": True, "token": token, "email": email, "full_name": full_name, "user_id": user_id, "role": role}
 
 
 def _delete_session(token: str) -> None:

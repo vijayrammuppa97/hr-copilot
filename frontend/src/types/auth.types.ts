@@ -3,6 +3,7 @@ export interface AuthUser {
   email:     string
   full_name: string
   user_id:   string
+  role?:     string
 }
 
 export interface UserProfile {

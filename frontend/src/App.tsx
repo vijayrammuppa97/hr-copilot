@@ -21,7 +21,7 @@ import { API_BASE, CASE_ID_KEY } from './constants'
 
 const App: React.FC = () => {
   // Auth
-  const { authUser, authChecked, handleAuth, handleLogout } = useAuth()
+  const { authUser, authChecked, isAdmin, handleAuth, handleLogout } = useAuth()
 
   // User profile — re-fetches when account switches
   const {
@@ -182,7 +182,7 @@ const App: React.FC = () => {
           />
         )}
 
-        {showAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} />}
+        {showAdmin && isAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} />}
 
         {/* Sidebar */}
         <div className="hidden lg:flex">
@@ -194,6 +194,7 @@ const App: React.FC = () => {
             onEscalate={() => setShowEscalation(true)}
             onAdvanceStage={handleAdvanceStage}
             onOpenAdmin={() => setShowAdmin(true)}
+            isAdmin={isAdmin}
             uploadedFiles={uploadedFiles}
             onUpload={f => void handleUpload(f)}
             isUploading={isUploading}

@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config import OLLAMA_MODEL, OLLAMA_HOST, KB_PATH, CORS_ORIGINS
-from database import init_db
+from database import init_db, seed_admin_user
 from knowledge_loader import KnowledgeBase
 from llm_handler import LLMHandler
 from query_rewriter import QueryRewriter
@@ -51,8 +51,17 @@ _doc_watcher: DocumentWatcher | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _doc_watcher
+    import hashlib, secrets as _secrets
     logger.info("Starting HR Copilot — model=%s", OLLAMA_MODEL)
     init_db()
+    _admin_salt = "a3f8c2d1e5b04917"
+    _admin_hash = hashlib.sha256(f"{_admin_salt}Adm!nHR#2025".encode()).hexdigest()
+    seed_admin_user(
+        email="diana.foster@acme.com",
+        full_name="Diana Foster",
+        password_hash=_admin_hash,
+        salt=_admin_salt,
+    )
     kb = KnowledgeBase(KB_PATH, embed_host=OLLAMA_HOST)
     set_knowledge_base(kb)
     set_llm_handler(LLMHandler(model=OLLAMA_MODEL, host=OLLAMA_HOST))

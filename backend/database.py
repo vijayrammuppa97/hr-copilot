@@ -152,7 +152,8 @@ def init_db() -> None:
                 password_hash TEXT NOT NULL,
                 salt          TEXT NOT NULL,
                 created_at    TEXT NOT NULL,
-                is_active     INTEGER DEFAULT 1
+                is_active     INTEGER DEFAULT 1,
+                role          TEXT DEFAULT 'user'
             );
 
             -- Login sessions — token issued on successful login
@@ -173,9 +174,17 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_eval_cid       ON evaluation_log(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_auth_sessions  ON auth_sessions(token);
         """)
-    # Migrate existing databases — add profile columns if missing
+    # Migrate existing databases — add columns if missing
     _migrate_user_profile_columns(conn)
+    _migrate_auth_users_columns(conn)
     logger.info("SQLite database ready at %s", DB_PATH)
+
+
+def _migrate_auth_users_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(auth_users)").fetchall()}
+    if "role" not in existing:
+        conn.execute("ALTER TABLE auth_users ADD COLUMN role TEXT DEFAULT 'user'")
+        logger.info("Migrated auth_users table: added column role")
 
 
 def _migrate_user_profile_columns(conn: sqlite3.Connection) -> None:
@@ -383,3 +392,33 @@ def get_messages_over_time(days: int = 30) -> list[dict]:
             (f"-{days} days",),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def seed_admin_user(email: str, full_name: str, password_hash: str, salt: str) -> None:
+    """Insert the admin account if it does not already exist."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM auth_users WHERE email = ?", (email,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE auth_users SET role = 'admin' WHERE email = ?", (email,)
+            )
+        else:
+            conn.execute(
+                """INSERT INTO auth_users
+                   (email, full_name, password_hash, salt, created_at, is_active, role)
+                   VALUES (?, ?, ?, ?, ?, 1, 'admin')""",
+                (email, full_name, password_hash, salt, now),
+            )
+    logger.info("Admin user seeded: %s", email)
+
+
+def get_user_role(email: str) -> str:
+    """Return the role for an email address ('user' if not found)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT role FROM auth_users WHERE email = ?", (email,)
+        ).fetchone()
+    return row["role"] if row and row["role"] else "user"

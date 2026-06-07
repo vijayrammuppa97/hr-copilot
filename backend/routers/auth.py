@@ -27,6 +27,7 @@ async def signup(request: Request, body: SignupRequest) -> dict:
         "email":     result["email"],
         "full_name": result["full_name"],
         "user_id":   result["user_id"],
+        "role":      result["role"],
     }
 
 
@@ -41,6 +42,7 @@ async def login(request: Request, body: LoginRequest) -> dict:
         "email":     result["email"],
         "full_name": result["full_name"],
         "user_id":   result["user_id"],
+        "role":      result["role"],
     }
 
 
@@ -58,4 +60,10 @@ async def me(credentials: HTTPAuthorizationCredentials | None = Security(_bearer
     user = verify_token(credentials.credentials)
     if not user:
         raise HTTPException(status_code=401, detail="Session expired or invalid. Please log in again.")
-    return user
+    return {
+        "token":     user["token"],
+        "email":     user["email"],
+        "full_name": user["full_name"],
+        "user_id":   user["user_id"],
+        "role":      user["role"],
+    }

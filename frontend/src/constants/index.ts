@@ -7,6 +7,7 @@ export const USERNAME_KEY        = 'hr_copilot_username'
 export const AUTH_TOKEN_KEY      = 'hr_copilot_auth_token'
 export const AUTH_EMAIL_KEY      = 'hr_copilot_auth_email'
 export const AUTH_NAME_KEY       = 'hr_copilot_auth_name'
+export const AUTH_ROLE_KEY       = 'hr_copilot_auth_role'
 
 // ── API ───────────────────────────────────────────────────────────────────── //
 export const API_BASE            = import.meta.env.VITE_API_URL ?? ''
