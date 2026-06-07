@@ -25,7 +25,7 @@ const App: React.FC = () => {
 
   // User profile — re-fetches when account switches
   const {
-    userId, username, userSessions, userProfile, setUserProfile, clearUserState,
+    userId, username, userSessions, userProfile, clearUserState,
   } = useUserProfile(authUser?.user_id)
 
   // Chat
@@ -182,7 +182,7 @@ const App: React.FC = () => {
           />
         )}
 
-        {showAdmin && isAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} />}
+        {showAdmin && isAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} token={authUser!.token} />}
 
         {/* Sidebar */}
         <div className="hidden lg:flex">

@@ -15,12 +15,7 @@ interface DailyCount { date: string; count: number }
 interface EvalRow { conversation_id: string; query: string; recall_at_k: number; faithfulness: number; relevance_score: number; timestamp: string }
 interface EvalSummary { averages: Record<string, number>; recent: EvalRow[] }
 
-const API_BASE   = import.meta.env.VITE_API_URL ?? ''
-const ADMIN_TOKEN = 'hr-admin-secret-2024'   // match ADMIN_TOKEN env var
-
-function authHeaders() {
-  return { 'Content-Type': 'application/json', Authorization: `Bearer ${ADMIN_TOKEN}` }
-}
+const API_BASE = import.meta.env.VITE_API_URL ?? ''
 
 function pct(v: number) { return `${Math.round(v * 100)}%` }
 
@@ -39,7 +34,7 @@ const StatCard: React.FC<{ label: string; value: string | number; sub?: string; 
   </div>
 )
 
-const AdminDashboard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+const AdminDashboard: React.FC<{ onClose: () => void; token: string }> = ({ onClose, token }) => {
   const [stats,    setStats]    = useState<Stats | null>(null)
   const [topQ,     setTopQ]     = useState<TopQuery[]>([])
   const [confDist, setConfDist] = useState<ConfBucket[]>([])
@@ -52,7 +47,7 @@ const AdminDashboard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     setLoading(true)
     setError(null)
     try {
-      const h = authHeaders()
+      const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
       const [s, q, c, d, e] = await Promise.all([
         fetch(`${API_BASE}/api/admin/stats`,                    { headers: h }).then(r => r.json()),
         fetch(`${API_BASE}/api/admin/top-interactions?limit=20`,{ headers: h }).then(r => r.json()),
@@ -66,7 +61,7 @@ const AdminDashboard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [token])
 
   useEffect(() => { void load() }, [load])
 
