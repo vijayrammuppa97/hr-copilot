@@ -1,381 +1,142 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Message, ChatRequest, OnboardingCase } from './types'
-import ChatMessage from './components/ChatMessage'
-import ChatInput from './components/ChatInput'
-import LoadingSkeleton from './components/LoadingSkeleton'
-import ErrorBoundary from './components/ErrorBoundary'
-import Sidebar from './components/Sidebar'
-import EscalationModal from './components/EscalationModal'
-import AdminDashboard from './components/AdminDashboard'
-import AuthPage from './components/AuthPage'
+import React, { useEffect, useRef, useCallback, useState } from 'react'
 
-const STORAGE_KEY         = 'hr_copilot_messages'
-const CONVERSATION_ID_KEY = 'hr_copilot_conversation_id'
-const CASE_ID_KEY         = 'hr_copilot_case_id'
-const USER_ID_KEY         = 'hr_copilot_user_id'
-const USERNAME_KEY        = 'hr_copilot_username'
-const AUTH_TOKEN_KEY      = 'hr_copilot_auth_token'
-const AUTH_EMAIL_KEY      = 'hr_copilot_auth_email'
-const AUTH_NAME_KEY       = 'hr_copilot_auth_name'
-const API_BASE            = import.meta.env.VITE_API_URL ?? ''
+// ── Hooks ─────────────────────────────────────────────────────────────────── //
+import { useAuth }        from './hooks/useAuth'
+import { useUserProfile } from './hooks/useUserProfile'
+import { useChat }        from './hooks/useChat'
 
-interface AuthUser { token: string; email: string; full_name: string; user_id: string }
+// ── Components ────────────────────────────────────────────────────────────── //
+import {
+  AuthPage, ChatMessage, ChatInput, LoadingSkeleton,
+  ErrorBoundary, Sidebar, EscalationModal, AdminDashboard,
+} from './components'
 
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
-}
+// ── Types ─────────────────────────────────────────────────────────────────── //
+import type { OnboardingCase } from './types'
 
-function getOrCreateConversationId(): string {
-  let id = localStorage.getItem(CONVERSATION_ID_KEY)
-  if (!id) { id = generateId(); localStorage.setItem(CONVERSATION_ID_KEY, id) }
-  return id
-}
+// ── Constants ─────────────────────────────────────────────────────────────── //
+import { API_BASE, CASE_ID_KEY } from './constants'
 
-function loadPersistedMessages(): Message[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as Message[]) : []
-  } catch { return [] }
-}
-
-function buildWelcomeMessage(case_: OnboardingCase): Message {
-  const firstName  = case_.employee_name.split(' ')[0]
-  const stageName  = case_.workflow.find((s) => s.stage_id === case_.current_stage)?.name ?? 'your first stage'
-  const totalDone  = case_.workflow.reduce((s, st) => s + st.completed_items, 0)
-  const totalItems = case_.workflow.reduce((s, st) => s + st.total_items, 0)
-  const isReturning = totalDone > 0
-  const content = isReturning
-    ? `Welcome back, ${firstName}! You've completed ${totalDone} of ${totalItems} onboarding tasks. Currently on **${stageName}** — let's pick up where you left off.`
-    : `Hi ${firstName}, welcome to Acme! I'm your HR Onboarding Assistant.\n\nYour Case ID is **${case_.case_id}** — keep this for any HR queries. You have **7 stages** to complete, starting with **${stageName}**. Ready to get started?`
-  return { id: generateId(), role: 'assistant', content, timestamp: new Date().toISOString() }
-}
-
-interface UploadedFile { name: string; sections: number }
-
-interface UserSession {
-  session_id: string
-  started_at: string
-  updated_at: string
-  message_count: number
-  preview: string | null
-}
+// ── App ───────────────────────────────────────────────────────────────────── //
 
 const App: React.FC = () => {
-  // ── Auth state ───────────────────────────────────────────────────────── //
-  const [authUser, setAuthUser]       = useState<AuthUser | null>(null)
-  const [authChecked, setAuthChecked] = useState(false)
-  const [userProfile, setUserProfile] = useState<{ tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null } | null>(null)
+  // Auth
+  const { authUser, authChecked, handleAuth, handleLogout } = useAuth()
 
-  // ── Chat / app state ─────────────────────────────────────────────────── //
-  const [messages, setMessages]                   = useState<Message[]>(loadPersistedMessages)
-  const [isLoading, setIsLoading]                 = useState(false)
-  const [error, setError]                         = useState<string | null>(null)
-  const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
-  const [uploadedFiles, setUploadedFiles]         = useState<UploadedFile[]>([])
-  const [isUploading, setIsUploading]             = useState(false)
-  const [prefill, setPrefill]                     = useState('')
-  const [onboardingCase, setOnboardingCase]       = useState<OnboardingCase | null>(null)
-  const [showEscalation, setShowEscalation]       = useState(false)
-  const [showAdmin, setShowAdmin]                 = useState(false)
-  const [caseLoading, setCaseLoading]             = useState(true)
-  const [userId, setUserId]                       = useState<string>('')
-  const [username, setUsername]                   = useState<string>('')
-  const [userSessions, setUserSessions]           = useState<UserSession[]>([])
-  const conversationId = useRef<string>(getOrCreateConversationId())
+  // User profile — re-fetches when account switches
+  const {
+    userId, username, userSessions, userProfile, setUserProfile, clearUserState,
+  } = useUserProfile(authUser?.user_id)
+
+  // Chat
+  const {
+    messages, isLoading, error, lastFailedMessage, isUploading,
+    conversationId, sendMessage, handleRetry, handleFileUpload, clearChat,
+    setMessages, setError,
+  } = useChat()
+
+  // UI state
+  const [prefill,        setPrefill]        = useState('')
+  const [onboardingCase, setOnboardingCase] = useState<OnboardingCase | null>(null)
+  const [showEscalation, setShowEscalation] = useState(false)
+  const [showAdmin,      setShowAdmin]      = useState(false)
+  const [caseLoading,    setCaseLoading]    = useState(true)
+  const [uploadedFiles,  setUploadedFiles]  = useState<{ name: string; sections: number }[]>([])
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // ── Auth: verify stored token on mount ───────────────────────────────── //
-  useEffect(() => {
-    const token = localStorage.getItem(AUTH_TOKEN_KEY)
-    if (!token) { setAuthChecked(true); return }
-    fetch(`${API_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : null)
-      .then((data: AuthUser | null) => {
-        if (data) {
-          setAuthUser(data)
-          localStorage.setItem(AUTH_TOKEN_KEY, data.token)
-          localStorage.setItem(AUTH_EMAIL_KEY, data.email)
-          localStorage.setItem(AUTH_NAME_KEY,  data.full_name)
-          localStorage.setItem(USER_ID_KEY,    data.user_id)
-        } else {
-          localStorage.removeItem(AUTH_TOKEN_KEY)
-          localStorage.removeItem(AUTH_EMAIL_KEY)
-          localStorage.removeItem(AUTH_NAME_KEY)
-        }
-      })
-      .catch(() => {
-        const email     = localStorage.getItem(AUTH_EMAIL_KEY) ?? ''
-        const full_name = localStorage.getItem(AUTH_NAME_KEY)  ?? ''
-        const user_id   = localStorage.getItem(USER_ID_KEY)    ?? ''
-        if (token && email) setAuthUser({ token, email, full_name, user_id })
-      })
-      .finally(() => setAuthChecked(true))
-  }, [])
-
-  const handleAuth = useCallback((user: AuthUser) => {
-    // Clear any previous user's data before setting new account
-    localStorage.setItem(AUTH_TOKEN_KEY,      user.token)
-    localStorage.setItem(AUTH_EMAIL_KEY,      user.email)
-    localStorage.setItem(AUTH_NAME_KEY,       user.full_name)
-    // Overwrite userId and username so session history is scoped to this account
-    localStorage.setItem(USER_ID_KEY,  user.user_id)
-    localStorage.removeItem(USERNAME_KEY)   // will be re-fetched from register call
-    localStorage.removeItem(STORAGE_KEY)    // clear chat from previous user
-    localStorage.removeItem(CONVERSATION_ID_KEY)
-    setMessages([])
-    setAuthUser(user)
-  }, [])
-
-  const handleLogout = useCallback(() => {
-    const token = localStorage.getItem(AUTH_TOKEN_KEY)
-    if (token) {
-      fetch(`${API_BASE}/api/auth/logout`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {})
-    }
-    localStorage.removeItem(AUTH_TOKEN_KEY)
-    localStorage.removeItem(AUTH_EMAIL_KEY)
-    localStorage.removeItem(AUTH_NAME_KEY)
-    localStorage.removeItem(USER_ID_KEY)
-    localStorage.removeItem(USERNAME_KEY)
-    localStorage.removeItem(STORAGE_KEY)
-    localStorage.removeItem(CONVERSATION_ID_KEY)
-    setAuthUser(null)
-    setUserId('')
-    setUsername('')
-    setUserSessions([])
-    setUserProfile(null)
-    setMessages([])
-    setError(null)
-  }, [])
-
-  // ── Register / restore user — re-runs whenever the logged-in account changes ── //
-  useEffect(() => {
-    if (!authUser) return   // wait until auth is confirmed
-    const storedId   = localStorage.getItem(USER_ID_KEY)  ?? ''
-    const storedName = localStorage.getItem(USERNAME_KEY) ?? ''
-
-    fetch(`${API_BASE}/api/users/register`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ user_id: storedId || undefined, username: storedName || undefined }),
-    })
-      .then((r) => r.ok ? r.json() : null)
-      .then((data: { user_id: string; username: string; tenure_years?: number | null; employment_type?: string | null; department?: string | null; role?: string | null } | null) => {
-        if (data) {
-          setUserId(data.user_id)
-          setUsername(data.username)
-          setUserProfile({ tenure_years: data.tenure_years, employment_type: data.employment_type, department: data.department, role: data.role })
-          localStorage.setItem(USER_ID_KEY,  data.user_id)
-          localStorage.setItem(USERNAME_KEY, data.username)
-          // Load session history
-          return fetch(`${API_BASE}/api/users/${data.user_id}/sessions`)
-            .then((r) => r.ok ? r.json() : [])
-            .then((sessions: UserSession[]) => setUserSessions(sessions))
-        }
-      })
-      .catch(() => { /* best-effort */ })
-  }, [authUser?.user_id])   // re-run when account switches
-
-  // ── Load case on mount ───────────────────────────────────────────────── //
+  // ── Load onboarding case ─────────────────────────────────────────────── //
   useEffect(() => {
     const storedCaseId = localStorage.getItem(CASE_ID_KEY)
     if (!storedCaseId) { setCaseLoading(false); return }
     fetch(`${API_BASE}/api/cases/${storedCaseId}`)
-      .then((r) => r.ok ? r.json() : null)
+      .then(r => r.ok ? r.json() : null)
       .then((data: OnboardingCase | null) => {
         if (data) {
           setOnboardingCase(data)
-          if (loadPersistedMessages().length === 0) setMessages([buildWelcomeMessage(data)])
+          if (!messages.length) {
+            const firstName = data.employee_name.split(' ')[0]
+            const stageName = data.workflow.find(s => s.stage_id === data.current_stage)?.name ?? 'your first stage'
+            const totalDone  = data.workflow.reduce((s, st) => s + st.completed_items, 0)
+            const totalItems = data.workflow.reduce((s, st) => s + st.total_items, 0)
+            const content = totalDone > 0
+              ? `Welcome back, ${firstName}! You've completed ${totalDone} of ${totalItems} onboarding tasks. Currently on **${stageName}** — let's pick up where you left off.`
+              : `Hi ${firstName}, welcome to Acme! I'm your HR Onboarding Assistant.\n\nYour Case ID is **${data.case_id}** — keep this for any HR queries. You have **7 stages** to complete, starting with **${stageName}**. Ready to get started?`
+            setMessages([{ id: `${Date.now()}`, role: 'assistant', content, timestamp: new Date().toISOString() }])
+          }
         } else {
           localStorage.removeItem(CASE_ID_KEY)
         }
       })
-      .catch(() => { /* general HR mode */ })
+      .catch(() => {})
       .finally(() => setCaseLoading(false))
-  }, [])
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages)) } catch { /* quota */ }
-  }, [messages])
-
+  // ── Scroll to bottom ─────────────────────────────────────────────────── //
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
 
-  // ── Refresh case ─────────────────────────────────────────────────────── //
+  // ── Persist messages ─────────────────────────────────────────────────── //
+  useEffect(() => {
+    try { localStorage.setItem('hr_copilot_messages', JSON.stringify(messages)) } catch { /* quota */ }
+  }, [messages])
+
+  // ── Onboarding helpers ───────────────────────────────────────────────── //
   const refreshCase = useCallback(async (caseId: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/cases/${caseId}`)
-      if (res.ok) setOnboardingCase((await res.json()) as OnboardingCase)
-    } catch { /* best-effort */ }
+    const res = await fetch(`${API_BASE}/api/cases/${caseId}`).catch(() => null)
+    if (res?.ok) setOnboardingCase(await res.json() as OnboardingCase)
   }, [])
 
-  // ── Complete checklist item ───────────────────────────────────────────── //
   const handleCompleteItem = useCallback(async (stageId: string, itemId: string) => {
     if (!onboardingCase) return
     const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/complete-item`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ stage_id: stageId, item_id: itemId }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage_id: stageId, item_id: itemId }),
     }).catch(() => null)
     if (res?.ok) {
-      const updated = (await res.json()) as OnboardingCase
+      const updated = await res.json() as OnboardingCase
       setOnboardingCase(updated)
-      const stage = updated.workflow.find((s) => s.stage_id === stageId)
-      const item  = stage?.items.find((i) => i.id === itemId)
-      if (item) void sendMessage(`I've marked "${item.label}" as complete.`)
+      const item = updated.workflow.find(s => s.stage_id === stageId)?.items.find(i => i.id === itemId)
+      if (item) void sendMessage(`I've marked "${item.label}" as complete.`, userId, onboardingCase.case_id)
     }
-  }, [onboardingCase]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onboardingCase, sendMessage, userId])
 
-  // ── Advance stage ─────────────────────────────────────────────────────── //
   const handleAdvanceStage = useCallback(async () => {
     if (!onboardingCase) return
     const res = await fetch(`${API_BASE}/api/cases/${onboardingCase.case_id}/advance-stage`, { method: 'POST' }).catch(() => null)
     if (res?.ok) {
-      const updated = (await res.json()) as OnboardingCase
+      const updated = await res.json() as OnboardingCase
       setOnboardingCase(updated)
-      const nextStage = updated.workflow.find((s) => s.stage_id === updated.current_stage)
+      const nextStage = updated.workflow.find(s => s.stage_id === updated.current_stage)
       const msg = updated.status === 'completed'
         ? "I've completed all onboarding stages! What else can I help with?"
         : `Moving on to **${nextStage?.name ?? 'the next stage'}** — what would you like to tackle first?`
-      void sendMessage(msg)
+      void sendMessage(msg, userId, onboardingCase.case_id)
     }
-  }, [onboardingCase]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onboardingCase, sendMessage, userId])
 
-  // ── Stage click ───────────────────────────────────────────────────────── //
-  const handleStageClick = useCallback((_stageId: string, stageName: string) => {
-    setPrefill(`Tell me about the ${stageName} stage and what I need to do.`)
-  }, [])
-
-  // ── Escalation ────────────────────────────────────────────────────────── //
   const handleEscalated = useCallback((message: string) => {
     setShowEscalation(false)
     if (onboardingCase) void refreshCase(onboardingCase.case_id)
-    setMessages((prev) => [...prev, { id: generateId(), role: 'assistant', content: message, timestamp: new Date().toISOString() }])
-  }, [onboardingCase, refreshCase])
+    setMessages(prev => [...prev, { id: `${Date.now()}`, role: 'assistant', content: message, timestamp: new Date().toISOString() }])
+  }, [onboardingCase, refreshCase, setMessages])
 
-  // ── Send ──────────────────────────────────────────────────────────────── //
-  const sendMessage = useCallback(async (content: string) => {
-    const trimmed = content.trim()
-    if (!trimmed || isLoading) return
-
-    setMessages((prev) => [...prev, { id: generateId(), role: 'user', content: trimmed, timestamp: new Date().toISOString() }])
-    setIsLoading(true)
+  const handleLogoutFull = useCallback(() => {
+    handleLogout()
+    clearUserState()
+    setMessages([])
     setError(null)
-    setLastFailedMessage(null)
+  }, [handleLogout, clearUserState, setMessages, setError])
 
-    const body: ChatRequest = {
-      message:        trimmed,
-      conversationId: conversationId.current,
-      caseId:         onboardingCase?.case_id,
-      userId:         userId || undefined,
-    } as ChatRequest & { userId?: string }
-
-    const assistantId = generateId()
-
-    try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
-        signal:  AbortSignal.timeout(125_000),
-      })
-      if (!res.ok) {
-        let detail = `Server error ${res.status}`
-        try { const j = (await res.json()) as { detail?: string }; if (j.detail) detail = j.detail } catch { /* ok */ }
-        throw new Error(detail)
-      }
-
-      const reader  = res.body?.getReader()
-      const decoder = new TextDecoder()
-      if (!reader) throw new Error('No response body')
-
-      setIsLoading(false)
-      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '', sources: [], confidence: 0, timestamp: new Date().toISOString(), feedback: null }])
-
-      let buffer = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const evt = JSON.parse(line.slice(6)) as { type: string; text?: string; sources?: string[]; confidence?: number; follow_up_questions?: string[]; timestamp?: string; message?: string }
-            if (evt.type === 'token' && evt.text) {
-              setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: m.content + evt.text } : m))
-            } else if (evt.type === 'done') {
-              setMessages((prev) => prev.map((m) => m.id === assistantId ? {
-                ...m,
-                sources: evt.sources ?? [],
-                confidence: evt.confidence ?? 0,
-                followUpQuestions: evt.follow_up_questions ?? [],
-                timestamp: evt.timestamp ?? m.timestamp,
-              } : m))
-            } else if (evt.type === 'error') {
-              throw new Error(evt.message ?? 'Stream error')
-            }
-          } catch { /* malformed */ }
-        }
-      }
-      return
-    } catch (err) {
-      const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
-      const msg = isTimeout
-        ? 'Request timed out. Ollama may still be loading the model — please try again.'
-        : err instanceof Error ? err.message : 'Unexpected error.'
-      setError(msg)
-      setLastFailedMessage(trimmed)
-      setMessages((prev) => [...prev, { id: generateId(), role: 'assistant', content: `Unable to get a response: ${msg}\n\nUse the **Get Human Help** button for immediate assistance.`, timestamp: new Date().toISOString(), isError: true }])
-    } finally {
-      setIsLoading(false)
-    }
-  }, [isLoading, onboardingCase, userId])
-
-  const handleRetry = useCallback(() => {
-    if (!lastFailedMessage) return
-    setMessages((prev) => {
-      const next = [...prev]
-      if (next.at(-1)?.isError) next.pop()
-      if (next.at(-1)?.role === 'user') next.pop()
-      return next
+  const handleUpload = useCallback(async (file: File) => {
+    const result = await handleFileUpload(file)
+    if (result) setUploadedFiles(prev => {
+      const existing = prev.find(f => f.name === result.name)
+      if (existing) return prev.map(f => f.name === result.name ? { ...f, sections: f.sections + result.sections } : f)
+      return [...prev, result]
     })
-    setError(null)
-    const msg = lastFailedMessage
-    setLastFailedMessage(null)
-    void sendMessage(msg)
-  }, [lastFailedMessage, sendMessage])
-
-  const handleFileUpload = useCallback(async (file: File) => {
-    setIsUploading(true)
-    const formData = new FormData()
-    formData.append('file', file)
-    try {
-      const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', body: formData, signal: AbortSignal.timeout(30_000) })
-      if (!res.ok) { const j = (await res.json()) as { detail?: string }; setError(j.detail ?? 'Upload failed'); return }
-      const data = (await res.json()) as { filename: string; sections_added: number }
-      setUploadedFiles((prev) => {
-        const exists = prev.find((f) => f.name === data.filename)
-        if (exists) return prev.map((f) => f.name === data.filename ? { ...f, sections: f.sections + data.sections_added } : f)
-        return [...prev, { name: data.filename, sections: data.sections_added }]
-      })
-    } catch { setError('Upload failed. Is the backend running?') }
-    finally { setIsUploading(false) }
-  }, [])
-
-  const clearChat = useCallback(() => {
-    setMessages([]); setError(null); setLastFailedMessage(null)
-    const newId = generateId()
-    conversationId.current = newId
-    localStorage.setItem(CONVERSATION_ID_KEY, newId)
-    localStorage.removeItem(STORAGE_KEY)
-  }, [])
+  }, [handleFileUpload])
 
   // ── Auth gate ─────────────────────────────────────────────────────────── //
   if (!authChecked) {
@@ -390,11 +151,7 @@ const App: React.FC = () => {
   }
 
   if (!authUser) {
-    return (
-      <ErrorBoundary>
-        <AuthPage onAuth={handleAuth} />
-      </ErrorBoundary>
-    )
+    return <ErrorBoundary><AuthPage onAuth={handleAuth} /></ErrorBoundary>
   }
 
   if (caseLoading) {
@@ -411,12 +168,18 @@ const App: React.FC = () => {
     )
   }
 
+  // ── Main layout ───────────────────────────────────────────────────────── //
   return (
     <ErrorBoundary>
       <div className="flex h-screen bg-surface-base overflow-hidden font-sans">
 
         {showEscalation && onboardingCase && (
-          <EscalationModal caseId={onboardingCase.case_id} apiBase={API_BASE} onClose={() => setShowEscalation(false)} onEscalated={handleEscalated} />
+          <EscalationModal
+            caseId={onboardingCase.case_id}
+            apiBase={API_BASE}
+            onClose={() => setShowEscalation(false)}
+            onEscalated={handleEscalated}
+          />
         )}
 
         {showAdmin && <AdminDashboard onClose={() => setShowAdmin(false)} />}
@@ -426,26 +189,26 @@ const App: React.FC = () => {
           <Sidebar
             onNewChat={clearChat}
             case_={onboardingCase}
-            onStageClick={handleStageClick}
+            onStageClick={(_id, name) => setPrefill(`Tell me about the ${name} stage and what I need to do.`)}
             onCompleteItem={handleCompleteItem}
             onEscalate={() => setShowEscalation(true)}
             onAdvanceStage={handleAdvanceStage}
             onOpenAdmin={() => setShowAdmin(true)}
             uploadedFiles={uploadedFiles}
-            onUpload={(f) => void handleFileUpload(f)}
+            onUpload={f => void handleUpload(f)}
             isUploading={isUploading}
             username={username}
             userSessions={userSessions}
             activeSessionId={conversationId.current}
-            onSelectSession={(sid) => {
+            onSelectSession={sid => {
               conversationId.current = sid
-              localStorage.setItem(CONVERSATION_ID_KEY, sid)
+              localStorage.setItem('hr_copilot_conversation_id', sid)
               setMessages([])
-              localStorage.removeItem(STORAGE_KEY)
+              localStorage.removeItem('hr_copilot_messages')
             }}
             authUser={authUser}
             userProfile={userProfile}
-            onLogout={handleLogout}
+            onLogout={handleLogoutFull}
           />
         </div>
 
@@ -455,7 +218,8 @@ const App: React.FC = () => {
             <div className="flex items-center gap-2.5">
               <div className="w-6 h-6 rounded-md bg-indigo-600 flex items-center justify-center">
                 <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
               </div>
               <span className="text-sm font-semibold text-slate-200">HR Onboarding</span>
@@ -463,17 +227,10 @@ const App: React.FC = () => {
             <div className="flex items-center gap-2">
               {onboardingCase && <button onClick={() => setShowEscalation(true)} className="text-xs text-amber-500">Get Help</button>}
               {messages.length > 0 && <button onClick={clearChat} className="text-xs text-slate-600 hover:text-slate-400">Clear</button>}
-              <button
-                onClick={handleLogout}
-                title={`Signed in as ${authUser.email}`}
-                className="text-xs text-slate-600 hover:text-rose-400 transition-colors ml-1"
-              >
-                Sign out
-              </button>
+              <button onClick={handleLogoutFull} className="text-xs text-slate-600 hover:text-rose-400 transition-colors ml-1">Sign out</button>
             </div>
           </header>
 
-          {/* Username badge */}
           {username && (
             <div className="lg:hidden flex items-center gap-2 px-4 py-1.5 bg-surface-panel border-b border-white/[0.04]">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -483,12 +240,12 @@ const App: React.FC = () => {
 
           <main className="flex-1 overflow-y-auto scrollbar-dark" role="main" aria-live="polite" aria-atomic="false" aria-relevant="additions">
             <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
-              {messages.map((msg) => (
+              {messages.map(msg => (
                 <ChatMessage
                   key={msg.id}
                   message={msg}
                   onRetry={msg.isError ? handleRetry : undefined}
-                  onFollowUp={(q) => void sendMessage(q)}
+                  onFollowUp={q => void sendMessage(q, userId, onboardingCase?.case_id)}
                 />
               ))}
               {isLoading && <LoadingSkeleton />}
@@ -512,13 +269,19 @@ const App: React.FC = () => {
 
           <footer className="border-t border-white/[0.06] bg-surface-base/80 backdrop-blur-xs px-6 py-4">
             <div className="max-w-3xl mx-auto">
-              <ChatInput onSend={sendMessage} isLoading={isLoading} prefill={prefill} onPrefillConsumed={() => setPrefill('')} />
+              <ChatInput
+                onSend={content => void sendMessage(content, userId, onboardingCase?.case_id)}
+                isLoading={isLoading}
+                prefill={prefill}
+                onPrefillConsumed={() => setPrefill('')}
+              />
               <p className="text-[10px] text-slate-700 text-center mt-2.5">
                 Responses are grounded in HR policy and your onboarding context. Verify important decisions with HR directly.
               </p>
             </div>
           </footer>
         </div>
+
       </div>
     </ErrorBoundary>
   )
